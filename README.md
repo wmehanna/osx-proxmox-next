@@ -18,6 +18,8 @@
 
 > This project is actively maintained through community support.  
 > If this tool saved you time, please support it: **https://ko-fi.com/lucidfabrics**
+>
+> Also please ⭐ this repo: **https://github.com/wmehanna/osx-proxmox-next**
 
 Noob-friendly macOS VM setup for Proxmox 9.
 If you can run one command and follow a simple wizard, you can use this.
@@ -34,6 +36,10 @@ If this helped you:
 - saved troubleshooting time
 - made macOS on Proxmox easier
 - replaced hours of manual trial/error
+
+please also help visibility:
+
+## ⭐ Star this repo: https://github.com/wmehanna/osx-proxmox-next
 
 please consider supporting development:
 
