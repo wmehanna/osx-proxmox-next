@@ -228,16 +228,16 @@ Optimized for **development workflows** (Xcode, SourceKit, code search). Similar
 
 ```bash
 # Apply blazing profile
-bash apply_blazing_profile.sh
+bash scripts/profiles/apply_blazing_profile.sh
 
 # Revert to macOS defaults
-bash revert_blazing_profile.sh
+bash scripts/profiles/revert_blazing_profile.sh
 
 # Apply xcode profile
-bash apply_xcode_profile.sh
+bash scripts/profiles/apply_xcode_profile.sh
 
 # Revert to macOS defaults
-bash revert_xcode_profile.sh
+bash scripts/profiles/revert_xcode_profile.sh
 ```
 
 ### 🛡️ Safety Notes
