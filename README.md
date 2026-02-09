@@ -156,6 +156,34 @@ Important:
 - Never share your SMBIOS serial identity publicly.
 - Do not clone one activated Apple-services identity across multiple VMs.
 
+## FAQ
+### Is this project production-ready?
+It is intended primarily for testing/lab use. You should validate stability and compliance before production usage.
+
+### Why does live apply get blocked with “missing assets”?
+Because required boot/install files are not found. Place assets under `/var/lib/vz/template/iso` or `/mnt/pve/*/template/iso`, then retry.
+
+### Why do I see UEFI Shell?
+Usually boot media path/order mismatch. Check OpenCore + installer attachments and confirm boot order starts with `ide2`.
+
+### Why is the installer not showing my target disk?
+Open Disk Utility -> `View -> Show All Devices`, then erase `QEMU HARDDISK Media` as `APFS` + `GUID`.
+
+### Why do I get “Guest has not initialized the display”?
+That usually means display/boot mismatch during early boot. This project defaults to a safer display profile; reboot VM after applying latest config.
+
+### Do I need to set VMID manually?
+No. The wizard auto-selects the next available VMID by default.
+
+### Can I use GPU passthrough?
+Yes, but host PCI passthrough setup is manual (IOMMU, vfio binding, GPU+audio functions). Follow Proxmox passthrough docs first.
+
+### Does this support Apple services (iCloud/iMessage)?
+Yes, with proper unique SMBIOS identity and correct OpenCore identity values. See Apple Services section above.
+
+### How can I make the VM faster?
+Use fast storage, avoid overcommitting host resources, apply one optimization at a time, and measure changes.
+
 ## CLI Usage
 ```bash
 # preflight
