@@ -21,6 +21,13 @@ If you can run one command and follow a simple wizard, you can use this.
 - `sequoia` (macOS 15)
 - `tahoe` (macOS 26 preview)
 
+## Supported OS Versions
+| macOS | Channel | TSC Required | Notes |
+|---|---|---|---|
+| Sonoma 14 | Stable | Recommended | Works best with stable host timing (`constant_tsc`, `nonstop_tsc`). |
+| Sequoia 15 | Stable | Recommended | Stable TSC improves responsiveness and reduces drift issues. |
+| Tahoe 26 | Preview | Recommended | Preview target; stable TSC strongly recommended for smoother install/runtime. |
+
 ## Prerequisites
 
 ### Hardware Requirements
