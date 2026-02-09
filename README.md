@@ -1,5 +1,15 @@
 # OSX Proxmox Next
 
+<p align="center">
+  <a href="https://github.com/wmehanna/osx-proxmox-next">
+    <img alt="Proxmox" src="https://img.shields.io/badge/Proxmox-9%20Ready-E57000?logo=proxmox&logoColor=white">
+  </a>
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-Sonoma%2014%20%7C%20Sequoia%2015%20%7C%20Tahoe%2026-111111?logo=apple&logoColor=white">
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img alt="Support on Ko-fi" src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white">
+  </a>
+</p>
+
 Noob-friendly macOS VM setup for Proxmox 9.
 If you can run one command and follow a simple wizard, you can use this.
 
@@ -11,53 +21,40 @@ If you can run one command and follow a simple wizard, you can use this.
 ## What You Get
 - Guided TUI workflow (Preflight -> Configure -> Dry Run -> Live Apply)
 - Auto-selected VMID (next free ID)
-- Auto-detected CPU/RAM defaults from host hardware (with safe limits)
+- Auto-detected CPU/RAM defaults from host hardware (safe limits)
 - Auto-detected Tahoe installer path (when found)
-- Safer defaults that avoid common boot/display/disk issues
-- Clear validation errors before live apply
-
-## Supported macOS Targets
-- `sonoma` (macOS 14)
-- `sequoia` (macOS 15)
-- `tahoe` (macOS 26 preview)
+- Safer defaults for boot/display/disk visibility
+- Clear validation before live apply
 
 ## Supported OS Versions
 | macOS | Channel | TSC Required | Notes |
 |---|---|---|---|
-| Sonoma 14 | Stable | Recommended | Works best with stable host timing (`constant_tsc`, `nonstop_tsc`). |
-| Sequoia 15 | Stable | Recommended | Stable TSC improves responsiveness and reduces drift issues. |
-| Tahoe 26 | Preview | Recommended | Preview target; stable TSC strongly recommended for smoother install/runtime. |
+| Sonoma 14 | Stable | Recommended | Best experience with stable TSC flags (`constant_tsc`, `nonstop_tsc`). |
+| Sequoia 15 | Stable | Recommended | Stable timing reduces clock drift and random VM lag. |
+| Tahoe 26 | Preview | Recommended | Preview target; stable timing strongly recommended. |
 
 ## Prerequisites
 
 ### Hardware Requirements
 | Component | Minimum | Recommended | Notes |
 |---|---|---|---|
-| CPU | Intel/AMD 4 cores | 8+ cores | Hardware virtualization required (VT-x/AMD-V). IOMMU needed for passthrough. |
-| RAM | 8GB host RAM | 16GB+ host RAM | Keep enough free RAM for Proxmox. Allocate at least 4GB to macOS VM. |
-| Storage | 64GB free | 128GB+ SSD/NVMe | macOS install is large; APFS and updates need extra headroom. |
-| GPU | Integrated/basic display | Discrete GPU passthrough | Passthrough can improve UX/performance but adds setup complexity. |
+| CPU | Intel/AMD 4 cores | 8+ cores | VT-x/AMD-V required. IOMMU required for passthrough. |
+| RAM | 8GB host RAM | 16GB+ host RAM | Keep headroom for Proxmox. Allocate at least 4GB to VM. |
+| Storage | 64GB free | 128GB+ SSD/NVMe | macOS + APFS updates need extra free space. |
+| GPU | Integrated/basic display | Discrete passthrough GPU | Passthrough can improve UX/perf but needs manual host setup. |
 
 ### Host Requirements
-- Proxmox VE 9 host with admin access (`root` shell).
-- Internet access for installer/bootstrap and dependencies.
-- ISO storage path available (for example `/var/lib/vz/template/iso`).
+- Proxmox VE 9 host with root shell access.
+- Internet access for bootstrap and dependencies.
+- ISO storage available (for example `/var/lib/vz/template/iso`).
 
 ### TSC Check (Recommended)
-macOS guests are sensitive to unstable CPU timing. A stable TSC helps avoid clock drift, lag, and random install/runtime issues.
-
-Quick check on host:
-
 ```bash
 lscpu | grep -E 'Model name|Flags'
 ```
+Look for `constant_tsc` and `nonstop_tsc` in CPU flags.
 
-Look for timing-related flags such as `constant_tsc` and `nonstop_tsc`.
-If your platform lacks stable timing behavior, reduce overcommit and avoid aggressive CPU tuning until baseline stability is confirmed.
-
-## One Command Install
-Run on your Proxmox host:
-
+## Quick Start (One Command)
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/wmehanna/osx-proxmox-next/main/install.sh)"
 ```
@@ -66,15 +63,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/wmehanna/osx-proxmox-nex
 1. Open `Preflight` and check for failures.
 2. Open `Wizard`.
 3. Click `Use Recommended`.
-4. Choose your macOS version button.
+4. Choose macOS version button.
 5. Choose storage target button.
-6. Click `Apply Dry` (safe test).
+6. Click `Apply Dry`.
 7. Click `Apply Live`.
 
 That is enough for most users.
 
-Wizard screenshot:
-
+### Wizard Preview
 ![Wizard Step 2](docs/images/wizard-step2.png)
 
 ## If Installer Does Not Show Your Disk
@@ -91,12 +87,12 @@ Then continue installation.
 ## How This Tool Works (Plain English)
 1. Reads your wizard settings.
 2. Finds OpenCore + recovery/installer assets.
-3. Builds a step-by-step `qm` plan.
+3. Builds a deterministic `qm` command plan.
 4. Runs it in dry mode or live mode.
-5. Stops live run early if required assets are missing.
+5. Blocks unsafe live runs if required assets are missing.
 
 ## GPU Passthrough (Proxmox 9, Intel/AMD CPU, AMD GPU)
-Do this on host first (manual):
+Host setup is manual:
 1. Enable virtualization + IOMMU in BIOS/UEFI.
 2. Enable IOMMU in kernel cmdline:
 - Intel: `intel_iommu=on iommu=pt`
@@ -109,80 +105,51 @@ Reference:
 - https://pve.proxmox.com/wiki/PCI(e)_Passthrough
 
 ## Network Optimization
-- Use bridge networking (`vmbr0`)
-- Use `virtio` network model
-- Keep MTU consistent host/switch/VM
-- Test throughput/latency before and after changes
+- Use bridge networking (`vmbr0`).
+- Use `virtio` NIC model.
+- Keep MTU consistent across host/switch/VM.
+- Measure before/after tuning (throughput and latency).
 
 References:
 - https://pve.proxmox.com/wiki/Network_Configuration
 - https://pve.proxmox.com/pve-docs/chapter-qm.html
 
-## Suggested Speed Optimizations
-After stable install:
-- Put VM disks on fast SSD/NVMe storage.
-- Do not over-allocate host CPU/RAM.
-- Keep some host resources free for Proxmox itself.
-- Keep main install disk on `sata0` (better installer visibility).
+## Suggested Performance Optimizations
+- Use SSD/NVMe-backed storage for VM disks.
+- Avoid overcommitting host CPU/RAM.
+- Keep main install disk on `sata0`.
 - Keep OpenCore on `ide2` and recovery on `ide3`.
 - Use `vga: std` for stable noVNC during install.
-- Measure one change at a time.
-
-## Common Problems
-### UEFI Shell
-- Usually wrong boot media/order.
-- Default boot order should be `ide2 -> ide3 -> sata0`.
-
-### “Guest has not initialized the display”
-- Usually boot/display profile mismatch.
-- Use latest defaults and reboot VM.
-
-### Live apply blocked: missing assets
-- Place required files in:
-- `/var/lib/vz/template/iso`
-- `/mnt/pve/*/template/iso`
+- Change one setting at a time and re-measure.
 
 ## Enable Apple Services (iCloud, iMessage, FaceTime)
-If macOS boots but Apple services fail, the most common cause is identity data (SMBIOS/serial) not being unique or not correctly set.
-
-Recommended checklist:
-1. Use a unique SMBIOS identity for each VM (do not reuse from other machines).
-2. Ensure serial-related values are valid and consistent in your OpenCore config.
-3. Confirm network is stable and date/time are correct in macOS.
-4. Sign in to iCloud first, then test iMessage/FaceTime.
-5. If services still fail, sign out, reboot, and sign in again after re-checking SMBIOS values.
+1. Use unique SMBIOS identity per VM.
+2. Ensure serial values are valid and consistent.
+3. Verify macOS date/time and network.
+4. Sign in to iCloud first, then iMessage/FaceTime.
 
 Important:
-- Never share your SMBIOS serial identity publicly.
-- Do not clone one activated Apple-services identity across multiple VMs.
+- Do not share SMBIOS identity values publicly.
+- Do not reuse the same identity across multiple VMs.
 
 ## FAQ
-### Is this project production-ready?
-It is intended primarily for testing/lab use. You should validate stability and compliance before production usage.
+### Is this production-ready?
+Primarily designed for testing/lab use.
 
-### Why does live apply get blocked with “missing assets”?
-Because required boot/install files are not found. Place assets under `/var/lib/vz/template/iso` or `/mnt/pve/*/template/iso`, then retry.
+### Why is live apply blocked with missing assets?
+Because required OpenCore/installer files were not found.
 
 ### Why do I see UEFI Shell?
-Usually boot media path/order mismatch. Check OpenCore + installer attachments and confirm boot order starts with `ide2`.
+Usually boot media path/order mismatch.
 
-### Why is the installer not showing my target disk?
-Open Disk Utility -> `View -> Show All Devices`, then erase `QEMU HARDDISK Media` as `APFS` + `GUID`.
-
-### Why do I get “Guest has not initialized the display”?
-That usually means display/boot mismatch during early boot. This project defaults to a safer display profile; reboot VM after applying latest config.
+### Why do I see “Guest has not initialized the display”?
+Usually boot/display profile mismatch during early boot.
 
 ### Do I need to set VMID manually?
-No. The wizard auto-selects the next available VMID by default.
+No, it auto-selects the next available VMID.
 
 ### Can I use GPU passthrough?
-Yes, but host PCI passthrough setup is manual (IOMMU, vfio binding, GPU+audio functions). Follow Proxmox passthrough docs first.
-
-### Does this support Apple services (iCloud/iMessage)?
-Yes, with proper unique SMBIOS identity and correct OpenCore identity values. See Apple Services section above.
-
-### How can I make the VM faster?
-Use fast storage, avoid overcommitting host resources, apply one optimization at a time, and measure changes.
+Yes, after host passthrough setup is completed.
 
 ## CLI Usage
 ```bash
@@ -202,43 +169,19 @@ osx-next-cli apply --execute \
   --bridge vmbr0 --storage local-lvm
 ```
 
-## CLI Usage
-```bash
-# Preflight
-osx-next-cli preflight
-
-# Plan only
-osx-next-cli plan \
-  --vmid 910 --name macos-sequoia --macos sequoia \
-  --cores 8 --memory 16384 --disk 128 \
-  --bridge vmbr0 --storage local-lvm
-
-# Dry apply
-osx-next-cli apply \
-  --vmid 910 --name macos-sequoia --macos sequoia \
-  --cores 8 --memory 16384 --disk 128 \
-  --bridge vmbr0 --storage local-lvm
-
-# Live apply
-osx-next-cli apply --execute \
-  --vmid 910 --name macos-sequoia --macos sequoia \
-  --cores 8 --memory 16384 --disk 128 \
-  --bridge vmbr0 --storage local-lvm
-```
-
-Tahoe example:
-
-```bash
-osx-next-cli apply --execute \
-  --vmid 926 --name macos-tahoe --macos tahoe \
-  --cores 8 --memory 16384 --disk 160 \
-  --bridge vmbr0 --storage local-lvm \
-  --installer-path /var/lib/vz/template/iso/macos-tahoe-full.iso
-```
-
 ## Support The Project
-- Ko-fi: https://ko-fi.com/lucidfabrics
-- You can create a project-specific Ko-fi URL by using a project-specific Ko-fi username (if available).
+<p align="left">
+  <a href="https://ko-fi.com/lucidfabrics">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi">
+  </a>
+</p>
+
+Current Ko-fi:
+- https://ko-fi.com/lucidfabrics
+
+Want a project-specific Ko-fi URL?
+- Create (or rename to) a project-specific Ko-fi username, if available.
+- Ko-fi link format is `https://ko-fi.com/<username>`.
 
 ## Project Layout
 - `src/osx_proxmox_next/app.py`: TUI workflow
