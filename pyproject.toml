@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osx-proxmox-next"
+version = "0.3.0"
+description = "Independent TUI-first macOS on Proxmox automation"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "textual>=0.60",
+  "rich>=13.7",
+]
+
+[project.scripts]
+osx-next = "osx_proxmox_next.app:run"
+osx-next-cli = "osx_proxmox_next.cli:run_cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
