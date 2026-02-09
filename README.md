@@ -142,6 +142,20 @@ After stable install:
 - `/var/lib/vz/template/iso`
 - `/mnt/pve/*/template/iso`
 
+## Enable Apple Services (iCloud, iMessage, FaceTime)
+If macOS boots but Apple services fail, the most common cause is identity data (SMBIOS/serial) not being unique or not correctly set.
+
+Recommended checklist:
+1. Use a unique SMBIOS identity for each VM (do not reuse from other machines).
+2. Ensure serial-related values are valid and consistent in your OpenCore config.
+3. Confirm network is stable and date/time are correct in macOS.
+4. Sign in to iCloud first, then test iMessage/FaceTime.
+5. If services still fail, sign out, reboot, and sign in again after re-checking SMBIOS values.
+
+Important:
+- Never share your SMBIOS serial identity publicly.
+- Do not clone one activated Apple-services identity across multiple VMs.
+
 ## CLI Usage
 ```bash
 # preflight
