@@ -35,6 +35,18 @@ If you can run one command and follow a simple wizard, you can use this.
 - Internet access for installer/bootstrap and dependencies.
 - ISO storage path available (for example `/var/lib/vz/template/iso`).
 
+### TSC Check (Recommended)
+macOS guests are sensitive to unstable CPU timing. A stable TSC helps avoid clock drift, lag, and random install/runtime issues.
+
+Quick check on host:
+
+```bash
+lscpu | grep -E 'Model name|Flags'
+```
+
+Look for timing-related flags such as `constant_tsc` and `nonstop_tsc`.
+If your platform lacks stable timing behavior, reduce overcommit and avoid aggressive CPU tuning until baseline stability is confirmed.
+
 ## One Command Install
 Run on your Proxmox host:
 
