@@ -151,21 +151,41 @@ References:
 
 ## Optional Performance Profiles (Unsupported)
 These scripts are optional and **not officially supported** by this project.
-Use only if you understand the changes and can revert quickly.
+They are local host scripts that tune macOS guest responsiveness.
+Use only if you understand the changes and keep the matching revert script ready.
 
-Suggested external scripts:
-- `/Users/wmehanna/apply_blazing_profile.sh`
-- `/Users/wmehanna/revert_blazing_profile.sh`
-- `/Users/wmehanna/apply_xcode_profile.sh`
-- `/Users/wmehanna/revert_xcode_profile.sh`
+Script locations:
+- `/Users/wassimmehanna/apply_blazing_profile.sh`
+- `/Users/wassimmehanna/revert_blazing_profile.sh`
+- `/Users/wassimmehanna/apply_xcode_profile.sh`
+- `/Users/wassimmehanna/revert_xcode_profile.sh`
+
+What each profile does:
+- `apply_blazing_profile.sh`
+- Disables many UI animations/transparency effects for snappier UI.
+- Forces no sleep on AC power (`pmset` sleep/display/disk/powernap adjustments).
+- Disables Spotlight indexing (`mdutil -a -i off`) to reduce background VM load.
+- Restarts Dock/Finder/SystemUIServer to apply changes.
+- `revert_blazing_profile.sh`
+- Restores normal macOS defaults for animations and power settings.
+- Re-enables Spotlight indexing.
+- Restarts Dock/Finder/SystemUIServer.
+- `apply_xcode_profile.sh`
+- Keeps UI optimization tweaks similar to blazing profile.
+- Prevents system sleep but keeps display sleep timeout for longer coding sessions.
+- Keeps Spotlight indexing ON for Xcode/SourceKit/search workflows.
+- Restarts Dock/Finder/SystemUIServer.
+- `revert_xcode_profile.sh`
+- Restores defaults for the xcode profile changes.
+- Restarts Dock/Finder/SystemUIServer.
 
 Example usage:
 ```bash
 # apply a profile
-bash /Users/wmehanna/apply_blazing_profile.sh
+bash /Users/wassimmehanna/apply_blazing_profile.sh
 
 # revert if needed
-bash /Users/wmehanna/revert_blazing_profile.sh
+bash /Users/wassimmehanna/revert_blazing_profile.sh
 ```
 
 Safety guidance:
@@ -173,16 +193,49 @@ Safety guidance:
 - Apply only one profile at a time.
 - Validate performance and stability after each change.
 - Keep the matching `revert_*` script ready.
+- These scripts accept an optional sudo password argument; avoid storing sensitive passwords in plain text.
 
 ## Enable Apple Services (iCloud, iMessage, FaceTime)
-1. Use unique SMBIOS identity per VM.
-2. Ensure serial values are valid and consistent.
-3. Verify macOS date/time and network.
-4. Sign in to iCloud first, then iMessage/FaceTime.
+Apple services depend mostly on clean SMBIOS identity and stable network/time.
+
+### Step-by-step
+1. Generate a unique SMBIOS set for this VM only.
+2. Use an SMBIOS model appropriate for your target macOS (for example recent iMacPro/MacPro class profiles used by OpenCore setups).
+3. Set all required values together in OpenCore config:
+- `SystemSerialNumber`
+- `MLB` (Board Serial)
+- `SystemUUID`
+- `ROM` (use a stable 6-byte value, commonly derived from NIC MAC without separators)
+4. Confirm NVRAM is writable and persists after reboot.
+5. Boot macOS and verify:
+- Date/time are correct (set automatically from network).
+- Network is stable and DNS works.
+6. Sign in order:
+- Sign in to Apple ID in System Settings first.
+- Then open Messages and FaceTime and sign in there.
+7. Reboot once after successful login to confirm session persistence.
+
+### Quick validation checklist
+- Identity values are unique to this VM.
+- No identity values copied from another working VM.
+- MAC address is stable (do not regenerate each boot).
+- Same OpenCore EFI is always used for this VM.
+- NVRAM reset is not being triggered on every boot.
+
+### Common failure fixes
+- "This Mac cannot connect to iCloud":
+- Recheck serial/MLB/UUID/ROM consistency and uniqueness.
+- Sign out of Apple ID, reboot, then sign in again.
+- "iMessage activation failed":
+- Verify ROM format/value and stable MAC mapping.
+- Check date/time sync and reboot router/VM network stack.
+- "Works once then breaks":
+- Ensure VM config is not regenerating SMBIOS or NIC MAC between boots.
 
 Important:
 - Do not share SMBIOS identity values publicly.
 - Do not reuse the same identity across multiple VMs.
+- Apple service activation is controlled by Apple and can still fail even with correct setup.
 
 ## FAQ
 ### Is this production-ready?
