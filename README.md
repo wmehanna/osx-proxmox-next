@@ -149,6 +149,31 @@ References:
 - Use `vga: std` for stable noVNC during install.
 - Change one setting at a time and re-measure.
 
+## Optional Performance Profiles (Unsupported)
+These scripts are optional and **not officially supported** by this project.
+Use only if you understand the changes and can revert quickly.
+
+Suggested external scripts:
+- `/Users/wmehanna/apply_blazing_profile.sh`
+- `/Users/wmehanna/revert_blazing_profile.sh`
+- `/Users/wmehanna/apply_xcode_profile.sh`
+- `/Users/wmehanna/revert_xcode_profile.sh`
+
+Example usage:
+```bash
+# apply a profile
+bash /Users/wmehanna/apply_blazing_profile.sh
+
+# revert if needed
+bash /Users/wmehanna/revert_blazing_profile.sh
+```
+
+Safety guidance:
+- Always snapshot/backup before applying tuning scripts.
+- Apply only one profile at a time.
+- Validate performance and stability after each change.
+- Keep the matching `revert_*` script ready.
+
 ## Enable Apple Services (iCloud, iMessage, FaceTime)
 1. Use unique SMBIOS identity per VM.
 2. Ensure serial values are valid and consistent.
