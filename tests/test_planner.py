@@ -55,13 +55,14 @@ def test_build_plan_sets_applesmc_args() -> None:
 
 
 def test_build_plan_includes_smbios_step() -> None:
+    import base64
     steps = build_plan(_cfg("sequoia"))
     titles = [step.title for step in steps]
     assert "Set SMBIOS identity" in titles
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
     assert "--smbios1" in smbios_step.command
-    assert "Apple Inc." in smbios_step.command
-    assert "family=Mac" in smbios_step.command
+    assert f"manufacturer={base64.b64encode(b'Apple Inc.').decode()}" in smbios_step.command
+    assert f"family={base64.b64encode(b'Mac').decode()}" in smbios_step.command
 
 
 def test_build_plan_skips_smbios_when_disabled() -> None:
@@ -73,15 +74,16 @@ def test_build_plan_skips_smbios_when_disabled() -> None:
 
 
 def test_build_plan_uses_provided_smbios() -> None:
+    import base64
     cfg = _cfg("sequoia")
     cfg.smbios_serial = "TESTSERIAL12"
     cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
     cfg.smbios_model = "MacPro7,1"
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
-    assert "TESTSERIAL12" in smbios_step.command
+    assert f"serial={base64.b64encode(b'TESTSERIAL12').decode()}" in smbios_step.command
     assert "12345678-1234-1234-1234-123456789ABC" in smbios_step.command
-    assert "MacPro7%2C1" in smbios_step.command
+    assert f"product={base64.b64encode(b'MacPro7,1').decode()}" in smbios_step.command
 
 
 def test_build_plan_uses_storage_iso_refs(monkeypatch) -> None:
@@ -104,17 +106,19 @@ def test_build_plan_uses_storage_iso_refs(monkeypatch) -> None:
 
 
 def test_smbios_model_fallback():
+    import base64
     cfg = _cfg("sequoia")
     cfg.smbios_serial = "TESTSERIAL12"
     cfg.smbios_uuid = "12345678-1234-1234-1234-123456789ABC"
     cfg.smbios_model = ""  # empty model triggers fallback
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
-    assert "iMacPro1%2C1" in smbios_step.command
+    assert f"product={base64.b64encode(b'iMacPro1,1').decode()}" in smbios_step.command
 
 
-def test_smbios_product_comma_is_encoded():
-    """Commas in Apple model names must be URL-encoded for Proxmox smbios1 parsing."""
+def test_smbios_values_are_base64_encoded():
+    """Smbios1 values must be Base64-encoded for Proxmox."""
+    import base64
     cfg = _cfg("tahoe")
     cfg.installer_path = "/tmp/tahoe.iso"
     cfg.smbios_serial = "TESTSERIAL12"
@@ -122,5 +126,6 @@ def test_smbios_product_comma_is_encoded():
     cfg.smbios_model = "MacPro7,1"
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
-    assert "product=MacPro7%2C1," in smbios_step.command
+    encoded = base64.b64encode(b"MacPro7,1").decode()
+    assert f"product={encoded}," in smbios_step.command
     assert "MacPro7,1" not in smbios_step.command

@@ -124,8 +124,9 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
 
 
 def _encode_smbios_value(value: str) -> str:
-    """Encode commas for Proxmox smbios1 key=value format."""
-    return value.replace(",", "%2C")
+    """Base64-encode a value for Proxmox smbios1 fields."""
+    import base64
+    return base64.b64encode(value.encode()).decode()
 
 
 def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
@@ -148,10 +149,10 @@ def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         model = model_for_macos(config.macos)
     smbios_value = (
         f"uuid={smbios_uuid},"
-        f"serial={serial},"
-        f"manufacturer=Apple Inc.,"
+        f"serial={_encode_smbios_value(serial)},"
+        f"manufacturer={_encode_smbios_value('Apple Inc.')},"
         f"product={_encode_smbios_value(model)},"
-        f"family=Mac"
+        f"family={_encode_smbios_value('Mac')}"
     )
     return [
         PlanStep(
