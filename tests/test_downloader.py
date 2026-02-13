@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import gzip
 import io
 import json
-import plistlib
 import subprocess as real_subprocess
 import urllib.error
 from pathlib import Path
@@ -20,15 +18,10 @@ from osx_proxmox_next.downloader import (
     _build_recovery_image,
     _download_file,
     _download_file_with_token,
-    _download_tahoe_installer,
-    _extract_sharedsupport_dmg,
     _fetch_github_release,
-    _find_installer_url,
     _find_release_asset,
-    _find_xar_entry,
     _get_recovery_session,
     _get_recovery_image_info,
-    _http_get_bytes,
 )
 
 
@@ -138,19 +131,51 @@ class TestDownloadOpencore:
 
 
 class TestDownloadRecovery:
-    def test_tahoe_delegates_to_installer(self, tmp_path, monkeypatch):
-        called = [False]
+    def test_tahoe_uses_osrecovery_with_latest(self, tmp_path, monkeypatch):
+        """Tahoe uses the same osrecovery path as Sonoma/Sequoia but with os=latest."""
+        session_resp = _make_response(b"")
+        session_resp.headers = {"Set-Cookie": "session=ABC123; path=/; HttpOnly"}
 
-        def fake_tahoe(dest_dir, on_progress=None):
-            called[0] = True
-            dest = dest_dir / "tahoe-full-installer.img"
-            dest.write_bytes(b"fake-installer")
-            return dest
+        captured_os_type = [None]
+        original_get_info = dl_module._get_recovery_image_info
 
-        monkeypatch.setattr(dl_module, "_download_tahoe_installer", fake_tahoe)
+        def spy_get_info(session, board_id, os_type="default"):
+            captured_os_type[0] = os_type
+            return {
+                "AU": "https://oscdn.apple.com/BaseSystem.dmg",
+                "AT": "TOKEN123",
+                "CU": "https://oscdn.apple.com/BaseSystem.chunklist",
+                "CT": "TOKEN456",
+            }
+
+        monkeypatch.setattr(dl_module, "_get_recovery_image_info", spy_get_info)
+        monkeypatch.setattr(dl_module, "_get_recovery_session", lambda: "session=ABC")
+
+        dmg_data = b"basesystem-dmg-content"
+        dmg_resp = _make_chunked_response([dmg_data], len(dmg_data))
+        chunklist_data = b"chunklist-content"
+        chunklist_resp = _make_chunked_response([chunklist_data], len(chunklist_data))
+
+        call_count = [0]
+
+        def fake_urlopen(req, timeout=None):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return dmg_resp
+            return chunklist_resp
+
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        def fake_build(dmg_path, chunklist_path, dest):
+            dest.write_bytes(b"built-recovery-image")
+
+        monkeypatch.setattr(dl_module, "_build_recovery_image", fake_build)
+
         result = download_recovery("tahoe", tmp_path)
-        assert called[0]
-        assert result == tmp_path / "tahoe-full-installer.img"
+        assert result == tmp_path / "tahoe-recovery.img"
+        assert result.exists()
+        assert captured_os_type[0] == "latest"
 
     def test_unknown_macos_rejected(self, tmp_path):
         with pytest.raises(DownloadError, match="No recovery board ID"):
@@ -414,6 +439,25 @@ class TestGetRecoveryImageInfo:
         assert result["AU"] == "https://oscdn.apple.com/BaseSystem.dmg"
         assert result["AT"] == "TOKEN123"
 
+    def test_os_type_passed_in_body(self, monkeypatch):
+        """Verify that os_type parameter is included in POST body."""
+        captured_body = []
+
+        def capturing_urlopen(req, timeout=None):
+            captured_body.append(req.data.decode("utf-8"))
+            resp = MagicMock()
+            resp.read.return_value = (
+                b"AU: https://x.com/img\nAT: T\nCU: https://x.com/cl\nCT: T\n"
+            )
+            resp.__enter__ = MagicMock(return_value=resp)
+            resp.__exit__ = MagicMock(return_value=False)
+            return resp
+
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", capturing_urlopen)
+
+        _get_recovery_image_info("session=ABC", "Mac-TEST", os_type="latest")
+        assert "os=latest" in captured_body[0]
+
     def test_network_error(self, monkeypatch):
         def fail(req, timeout=None):
             raise ConnectionError("no network")
@@ -591,447 +635,47 @@ class TestBuildRecoveryImage:
             _build_recovery_image(dmg, chunklist, dest)
 
 
-def _make_sucatalog(products: list[dict]) -> bytes:
-    """Build a gzipped plist sucatalog from a list of product dicts."""
-    catalog = {"Products": {}}
-    for i, prod in enumerate(products):
-        catalog["Products"][f"0{i+1:02d}-{i+1:05d}"] = prod
-    raw = plistlib.dumps(catalog)
-    return gzip.compress(raw)
+class TestRecoveryOsType:
+    def test_sonoma_uses_default(self, tmp_path, monkeypatch):
+        """Sonoma uses os=default for osrecovery."""
+        captured = []
 
-
-def _make_dist_xml(title: str) -> bytes:
-    return f'<?xml version="1.0"?><installer><title>{title}</title></installer>'.encode()
-
-
-class TestFindInstallerUrl:
-    def _catalog_with_tahoe(self) -> bytes:
-        return _make_sucatalog([
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/content/foo/InstallAssistant.pkg", "Size": 13_000_000_000},
-                ],
-                "Distributions": {"English": "https://swdist.apple.com/content/foo/English.dist"},
-                "PostDate": "2025-06-10T00:00:00Z",
+        def spy_get_info(session, board_id, os_type="default"):
+            captured.append(os_type)
+            return {
+                "AU": "https://oscdn.apple.com/img",
+                "AT": "T", "CU": "https://oscdn.apple.com/cl", "CT": "T",
             }
-        ])
 
-    def test_success(self, monkeypatch):
-        catalog_gz = self._catalog_with_tahoe()
-        dist_xml = _make_dist_xml("macOS Tahoe")
-
-        call_count = [0]
-
-        def fake_http_get_bytes(url):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return catalog_gz
-            return dist_xml
-
-        monkeypatch.setattr(dl_module, "_http_get_bytes", fake_http_get_bytes)
-
-        result = _find_installer_url("tahoe")
-        assert "InstallAssistant.pkg" in result
-
-    def test_no_match_title(self, monkeypatch):
-        catalog_gz = self._catalog_with_tahoe()
-        dist_xml = _make_dist_xml("macOS Sequoia")
-
-        call_count = [0]
-
-        def fake_http_get_bytes(url):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return catalog_gz
-            return dist_xml
-
-        monkeypatch.setattr(dl_module, "_http_get_bytes", fake_http_get_bytes)
-
-        with pytest.raises(DownloadError, match="No installer found"):
-            _find_installer_url("tahoe")
-
-    def test_empty_catalog(self, monkeypatch):
-        catalog_gz = _make_sucatalog([])
-        monkeypatch.setattr(dl_module, "_http_get_bytes", lambda url: catalog_gz)
-
-        with pytest.raises(DownloadError, match="No installer found"):
-            _find_installer_url("tahoe")
-
-    def test_unknown_macos(self):
-        with pytest.raises(DownloadError, match="No installer title mapping"):
-            _find_installer_url("catalina")
-
-    def test_skips_small_packages(self, monkeypatch):
-        catalog_gz = _make_sucatalog([
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/content/foo/InstallAssistant.pkg", "Size": 100_000},
-                ],
-                "Distributions": {"English": "https://swdist.apple.com/content/foo/English.dist"},
-                "PostDate": "2025-06-10T00:00:00Z",
-            }
-        ])
-        monkeypatch.setattr(dl_module, "_http_get_bytes", lambda url: catalog_gz)
-
-        with pytest.raises(DownloadError, match="No installer found"):
-            _find_installer_url("tahoe")
-
-    def test_picks_most_recent(self, monkeypatch):
-        catalog_gz = _make_sucatalog([
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/old/InstallAssistant.pkg", "Size": 13_000_000_000},
-                ],
-                "Distributions": {"English": "https://swdist.apple.com/old/English.dist"},
-                "PostDate": "2025-06-01T00:00:00Z",
-            },
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/new/InstallAssistant.pkg", "Size": 13_000_000_000},
-                ],
-                "Distributions": {"English": "https://swdist.apple.com/new/English.dist"},
-                "PostDate": "2025-06-10T00:00:00Z",
-            },
-        ])
-        dist_xml = _make_dist_xml("macOS Tahoe")
-
-        def fake_http_get_bytes(url):
-            if url.endswith(".sucatalog.gz"):
-                return catalog_gz
-            return dist_xml
-
-        monkeypatch.setattr(dl_module, "_http_get_bytes", fake_http_get_bytes)
-
-        result = _find_installer_url("tahoe")
-        assert "new" in result
-
-    def test_skips_product_without_distributions(self, monkeypatch):
-        catalog_gz = _make_sucatalog([
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/content/foo/InstallAssistant.pkg", "Size": 13_000_000_000},
-                ],
-                "Distributions": {},
-                "PostDate": "2025-06-10T00:00:00Z",
-            }
-        ])
-        monkeypatch.setattr(dl_module, "_http_get_bytes", lambda url: catalog_gz)
-
-        with pytest.raises(DownloadError, match="No installer found"):
-            _find_installer_url("tahoe")
-
-    def test_skips_product_with_dist_fetch_error(self, monkeypatch):
-        catalog_gz = _make_sucatalog([
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/content/foo/InstallAssistant.pkg", "Size": 13_000_000_000},
-                ],
-                "Distributions": {"English": "https://swdist.apple.com/content/foo/English.dist"},
-                "PostDate": "2025-06-10T00:00:00Z",
-            }
-        ])
-
-        def fake_http_get_bytes(url):
-            if url.endswith(".sucatalog.gz"):
-                return catalog_gz
-            raise ConnectionError("dist fetch failed")
-
-        monkeypatch.setattr(dl_module, "_http_get_bytes", fake_http_get_bytes)
-
-        with pytest.raises(DownloadError, match="No installer found"):
-            _find_installer_url("tahoe")
-
-    def test_skips_product_with_no_title_in_dist(self, monkeypatch):
-        catalog_gz = _make_sucatalog([
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/content/foo/InstallAssistant.pkg", "Size": 13_000_000_000},
-                ],
-                "Distributions": {"English": "https://swdist.apple.com/content/foo/English.dist"},
-                "PostDate": "2025-06-10T00:00:00Z",
-            }
-        ])
-
-        def fake_http_get_bytes(url):
-            if url.endswith(".sucatalog.gz"):
-                return catalog_gz
-            return b'<?xml version="1.0"?><installer><description>No title here</description></installer>'
-
-        monkeypatch.setattr(dl_module, "_http_get_bytes", fake_http_get_bytes)
-
-        with pytest.raises(DownloadError, match="No installer found"):
-            _find_installer_url("tahoe")
-
-    def test_uses_en_fallback_distribution(self, monkeypatch):
-        catalog_gz = _make_sucatalog([
-            {
-                "Packages": [
-                    {"URL": "https://swcdn.apple.com/content/foo/InstallAssistant.pkg", "Size": 13_000_000_000},
-                ],
-                "Distributions": {"en": "https://swdist.apple.com/content/foo/en.dist"},
-                "PostDate": "2025-06-10T00:00:00Z",
-            }
-        ])
-        dist_xml = _make_dist_xml("macOS Tahoe")
-
-        def fake_http_get_bytes(url):
-            if url.endswith(".sucatalog.gz"):
-                return catalog_gz
-            return dist_xml
-
-        monkeypatch.setattr(dl_module, "_http_get_bytes", fake_http_get_bytes)
-
-        result = _find_installer_url("tahoe")
-        assert "InstallAssistant.pkg" in result
-
-
-class TestHttpGetBytes:
-    def test_success(self, monkeypatch):
-        resp = _make_response(b"hello bytes")
-        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
-        result = _http_get_bytes("https://example.com/data")
-        assert result == b"hello bytes"
-
-    def test_network_error(self, monkeypatch):
-        def fail(req, timeout=None):
-            raise ConnectionError("no network")
-        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fail)
-
-        with pytest.raises(DownloadError, match="Failed to fetch"):
-            _http_get_bytes("https://example.com/data")
-
-
-def _make_fake_xar(path: Path, entry_name: str, entry_data: bytes) -> None:
-    """Build a minimal XAR archive with one file entry."""
-    import struct
-    import zlib as _zlib
-
-    toc_xml = (
-        f'<?xml version="1.0" encoding="UTF-8"?>'
-        f"<xar><toc><file id=\"1\"><name>{entry_name}</name>"
-        f"<data><offset>0</offset><size>{len(entry_data)}</size>"
-        f"<length>{len(entry_data)}</length>"
-        f"<encoding style=\"application/octet-stream\"/></data>"
-        f"</file></toc></xar>"
-    ).encode("utf-8")
-    toc_compressed = _zlib.compress(toc_xml)
-    header = b"xar!" + struct.pack(">H", 28) + struct.pack(">H", 1)
-    header += struct.pack(">Q", len(toc_compressed))
-    header += struct.pack(">Q", len(toc_xml))
-    header += struct.pack(">I", 1)  # SHA-1
-    with open(path, "wb") as f:
-        f.write(header)
-        f.write(toc_compressed)
-        f.write(entry_data)
-
-
-class TestFindXarEntry:
-    def test_success(self, tmp_path):
-        pkg = tmp_path / "test.pkg"
-        _make_fake_xar(pkg, "SharedSupport.dmg", b"dmg-data-here")
-        offset, size = _find_xar_entry(pkg, "SharedSupport.dmg")
-        assert size == 13
-        with open(pkg, "rb") as f:
-            f.seek(offset)
-            assert f.read(size) == b"dmg-data-here"
-
-    def test_entry_not_found(self, tmp_path):
-        pkg = tmp_path / "test.pkg"
-        _make_fake_xar(pkg, "OtherFile.bin", b"data")
-        with pytest.raises(DownloadError, match="not found inside installer"):
-            _find_xar_entry(pkg, "SharedSupport.dmg")
-
-    def test_invalid_magic(self, tmp_path):
-        pkg = tmp_path / "test.pkg"
-        pkg.write_bytes(b"NOT_XAR_FILE_DATA")
-        with pytest.raises(DownloadError, match="Not a valid XAR"):
-            _find_xar_entry(pkg, "SharedSupport.dmg")
-
-    def test_entry_with_no_data_element(self, tmp_path):
-        """File entry matches name but has no <data> child — should skip."""
-        import struct
-        import zlib as _zlib
-
-        toc_xml = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<xar><toc>'
-            '<file id="1"><name>SharedSupport.dmg</name></file>'
-            '</toc></xar>'
-        ).encode("utf-8")
-        toc_compressed = _zlib.compress(toc_xml)
-        header = b"xar!" + struct.pack(">H", 28) + struct.pack(">H", 1)
-        header += struct.pack(">Q", len(toc_compressed))
-        header += struct.pack(">Q", len(toc_xml))
-        header += struct.pack(">I", 1)
-
-        pkg = tmp_path / "test.pkg"
-        with open(pkg, "wb") as f:
-            f.write(header)
-            f.write(toc_compressed)
-
-        with pytest.raises(DownloadError, match="not found inside installer"):
-            _find_xar_entry(pkg, "SharedSupport.dmg")
-
-
-class TestExtractSharedsupportDmg:
-    def test_success(self, tmp_path):
-        pkg_path = tmp_path / "test.pkg"
-        dmg_content = b"fake dmg content " * 100
-        _make_fake_xar(pkg_path, "SharedSupport.dmg", dmg_content)
-
-        result = _extract_sharedsupport_dmg(pkg_path, tmp_path)
-        assert result == tmp_path / "tahoe-SharedSupport.dmg"
-        assert result.exists()
-        assert result.read_bytes() == dmg_content
-
-    def test_no_dmg_in_pkg(self, tmp_path):
-        pkg_path = tmp_path / "test.pkg"
-        _make_fake_xar(pkg_path, "OtherFile.bin", b"not a dmg")
-
-        with pytest.raises(DownloadError, match="not found inside installer"):
-            _extract_sharedsupport_dmg(pkg_path, tmp_path)
-
-    def test_corrupt_pkg(self, tmp_path):
-        pkg_path = tmp_path / "test.pkg"
-        pkg_path.write_bytes(b"corrupt data")
-
-        with pytest.raises(DownloadError, match="Failed to parse installer"):
-            _extract_sharedsupport_dmg(pkg_path, tmp_path)
-
-    def test_short_read(self, tmp_path, monkeypatch):
-        """When file is shorter than expected size, extraction stops gracefully."""
-        pkg_path = tmp_path / "test.pkg"
-        _make_fake_xar(pkg_path, "SharedSupport.dmg", b"short")
-
-        # Return a size larger than the actual data
-        file_size = pkg_path.stat().st_size
-        monkeypatch.setattr(
-            dl_module, "_find_xar_entry",
-            lambda pkg, name: (file_size - 5, 999999),
-        )
-
-        result = _extract_sharedsupport_dmg(pkg_path, tmp_path)
-        assert result.exists()
-        assert len(result.read_bytes()) == 5  # only 5 bytes available
-
-    def test_io_error_cleans_up(self, tmp_path, monkeypatch):
-        pkg_path = tmp_path / "test.pkg"
-        _make_fake_xar(pkg_path, "SharedSupport.dmg", b"data")
-
-        monkeypatch.setattr(
-            dl_module, "_find_xar_entry",
-            lambda pkg, name: (0, 100),
-        )
-        # Seeking to offset 0 with size 100 on a small file will produce short read
-        # but won't error. Force an error by making the dest unwritable.
-        dmg_dest = tmp_path / "tahoe-SharedSupport.dmg"
-
-        original_open = open
-
-        call_count = [0]
-
-        def failing_open(path, mode="r", *args, **kwargs):
-            if str(path) == str(dmg_dest) and "w" in mode:
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    raise OSError("disk full")
-            return original_open(path, mode, *args, **kwargs)
-
-        import builtins
-        monkeypatch.setattr(builtins, "open", failing_open)
-
-        with pytest.raises(DownloadError, match="Failed to extract SharedSupport"):
-            _extract_sharedsupport_dmg(pkg_path, tmp_path)
-        assert not dmg_dest.exists()
-
-
-class TestDownloadTahoeInstaller:
-    def test_existing_skip(self, tmp_path):
-        dest = tmp_path / "tahoe-full-installer.img"
-        dest.write_bytes(b"existing installer")
-        result = _download_tahoe_installer(tmp_path)
-        assert result == dest
-
-    def test_success(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dl_module, "_get_recovery_image_info", spy_get_info)
+        monkeypatch.setattr(dl_module, "_get_recovery_session", lambda: "session=X")
+        monkeypatch.setattr(dl_module, "_download_file_with_token",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(dl_module, "_build_recovery_image",
+                            lambda dmg, cl, dest: dest.write_bytes(b"img"))
         monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
 
-        monkeypatch.setattr(
-            dl_module, "_find_installer_url",
-            lambda macos: "https://swcdn.apple.com/content/foo/InstallAssistant.pkg",
-        )
+        download_recovery("sonoma", tmp_path)
+        assert captured[0] == "default"
 
-        pkg_data = b"fake-pkg-data"
-        file_resp = _make_chunked_response([pkg_data], len(pkg_data))
-        monkeypatch.setattr(
-            dl_module.urllib.request, "urlopen",
-            lambda req, timeout=None: file_resp,
-        )
+    def test_tahoe_uses_latest(self, tmp_path, monkeypatch):
+        """Tahoe uses os=latest for osrecovery to get macOS 26."""
+        captured = []
 
-        def fake_extract(pkg_path, dest_dir):
-            dmg = dest_dir / "tahoe-SharedSupport.dmg"
-            dmg.write_bytes(b"fake-dmg")
-            return dmg
+        def spy_get_info(session, board_id, os_type="default"):
+            captured.append(os_type)
+            return {
+                "AU": "https://oscdn.apple.com/img",
+                "AT": "T", "CU": "https://oscdn.apple.com/cl", "CT": "T",
+            }
 
-        monkeypatch.setattr(dl_module, "_extract_sharedsupport_dmg", fake_extract)
-
-        def fake_build(dmg_path, _chunklist, dest):
-            dest.write_bytes(b"final-image")
-
-        monkeypatch.setattr(dl_module, "_build_recovery_image", fake_build)
-
-        result = _download_tahoe_installer(tmp_path)
-        assert result == tmp_path / "tahoe-full-installer.img"
-        assert result.exists()
-        # Intermediate files should be cleaned up
-        assert not (tmp_path / "tahoe-InstallAssistant.pkg").exists()
-        assert not (tmp_path / "tahoe-SharedSupport.dmg").exists()
-
-    def test_catalog_no_match(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
-        monkeypatch.setattr(
-            dl_module, "_find_installer_url",
-            MagicMock(side_effect=DownloadError("No installer found")),
-        )
-
-        with pytest.raises(DownloadError, match="No installer found"):
-            _download_tahoe_installer(tmp_path)
-
-    def test_progress_callback(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dl_module, "_get_recovery_image_info", spy_get_info)
+        monkeypatch.setattr(dl_module, "_get_recovery_session", lambda: "session=X")
+        monkeypatch.setattr(dl_module, "_download_file_with_token",
+                            lambda *a, **kw: None)
+        monkeypatch.setattr(dl_module, "_build_recovery_image",
+                            lambda dmg, cl, dest: dest.write_bytes(b"img"))
         monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
 
-        monkeypatch.setattr(
-            dl_module, "_find_installer_url",
-            lambda macos: "https://swcdn.apple.com/content/foo/InstallAssistant.pkg",
-        )
-
-        chunk1 = b"a" * 1000
-        chunk2 = b"b" * 500
-        total = len(chunk1) + len(chunk2)
-        file_resp = _make_chunked_response([chunk1, chunk2], total)
-        monkeypatch.setattr(
-            dl_module.urllib.request, "urlopen",
-            lambda req, timeout=None: file_resp,
-        )
-
-        def fake_extract(pkg_path, dest_dir):
-            dmg = dest_dir / "tahoe-SharedSupport.dmg"
-            dmg.write_bytes(b"fake-dmg")
-            return dmg
-
-        monkeypatch.setattr(dl_module, "_extract_sharedsupport_dmg", fake_extract)
-
-        def fake_build(dmg_path, _chunklist, dest):
-            dest.write_bytes(b"final-image")
-
-        monkeypatch.setattr(dl_module, "_build_recovery_image", fake_build)
-
-        progress_calls: list[DownloadProgress] = []
-
-        def on_progress(p: DownloadProgress) -> None:
-            progress_calls.append(p)
-
-        result = _download_tahoe_installer(tmp_path, on_progress)
-        assert result.exists()
-        assert len(progress_calls) == 2
-        assert progress_calls[0].phase == "installer"
-        assert progress_calls[1].phase == "installer"
+        download_recovery("tahoe", tmp_path)
+        assert captured[0] == "latest"

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import gzip
-import plistlib
 import random
-import re
 import string
 import subprocess
 import time
@@ -35,6 +32,12 @@ class DownloadError(Exception):
 RECOVERY_BOARD_IDS: dict[str, str] = {
     "sonoma": "Mac-827FAC58A8FDFA22",
     "sequoia": "Mac-27AD2F918AE68F61",
+    "tahoe": "Mac-27AD2F918AE68F61",  # Sequoia board ID + os=latest → returns Tahoe
+}
+
+# osrecovery returns "latest" OS for Tahoe (macOS 26), "default" for others
+_RECOVERY_OS_TYPE: dict[str, str] = {
+    "tahoe": "latest",
 }
 
 _OSRECOVERY_URL = "http://osrecovery.apple.com/"
@@ -45,14 +48,6 @@ _GITHUB_API = "https://api.github.com/repos/lucid-fabrics/osx-proxmox-next/relea
 _CHUNK_SIZE = 65536
 _MAX_RETRIES = 3
 _BACKOFF_SECONDS = [1, 2, 4]
-
-_SUCATALOG_URL = (
-    "https://swscan.apple.com/content/catalogs/others/"
-    "index-15-14-13-12-10.16-10.15-10.14-10.13-10.12-10.11-10.10-10.9-"
-    "mountainlion-lion-snowleopard-leopard.merged-1.sucatalog.gz"
-)
-_MACOS_TITLES: dict[str, str] = {"tahoe": "macOS Tahoe"}
-_MIN_INSTALLER_SIZE = 5_000_000_000  # 5 GB — filters small packages
 
 
 def download_opencore(
@@ -79,9 +74,6 @@ def download_recovery(
     dest_dir: Path,
     on_progress: ProgressCallback = None,
 ) -> Path:
-    if macos == "tahoe":
-        return _download_tahoe_installer(dest_dir, on_progress)
-
     if macos not in RECOVERY_BOARD_IDS:
         raise DownloadError(f"No recovery board ID for '{macos}'.")
 
@@ -90,8 +82,9 @@ def download_recovery(
         return dest
 
     board_id = RECOVERY_BOARD_IDS[macos]
+    os_type = _RECOVERY_OS_TYPE.get(macos, "default")
     session = _get_recovery_session()
-    image_info = _get_recovery_image_info(session, board_id)
+    image_info = _get_recovery_image_info(session, board_id, os_type)
     image_url = image_info["AU"]
     chunklist_url = image_info["CU"]
     asset_token = image_info["AT"]
@@ -109,149 +102,6 @@ def download_recovery(
     chunklist_path.unlink(missing_ok=True)
 
     return dest
-
-
-def _download_tahoe_installer(
-    dest_dir: Path,
-    on_progress: ProgressCallback = None,
-) -> Path:
-    dest = dest_dir / "tahoe-full-installer.img"
-    if dest.exists():
-        return dest
-
-    pkg_url = _find_installer_url("tahoe")
-    pkg_path = dest_dir / "tahoe-InstallAssistant.pkg"
-    _download_file(pkg_url, pkg_path, on_progress, "installer")
-
-    dmg_path = _extract_sharedsupport_dmg(pkg_path, dest_dir)
-
-    _build_recovery_image(dmg_path, dmg_path, dest)
-
-    pkg_path.unlink(missing_ok=True)
-    dmg_path.unlink(missing_ok=True)
-
-    return dest
-
-
-def _find_installer_url(macos: str) -> str:
-    title = _MACOS_TITLES.get(macos)
-    if not title:
-        raise DownloadError(f"No installer title mapping for '{macos}'.")
-
-    catalog_bytes = _http_get_bytes(_SUCATALOG_URL)
-    catalog_data = gzip.decompress(catalog_bytes)
-    catalog = plistlib.loads(catalog_data)
-
-    products = catalog.get("Products", {})
-    candidates: list[tuple[str, str]] = []  # (post_date_str, pkg_url)
-
-    for product_id, product in products.items():
-        packages = product.get("Packages", [])
-        pkg_url = ""
-        for pkg in packages:
-            url = pkg.get("URL", "")
-            size = pkg.get("Size", 0)
-            if "InstallAssistant.pkg" in url and size > _MIN_INSTALLER_SIZE:
-                pkg_url = url
-                break
-        if not pkg_url:
-            continue
-
-        dist_url = ""
-        distributions = product.get("Distributions", {})
-        dist_url = distributions.get("English") or distributions.get("en", "")
-        if not dist_url:
-            continue
-
-        try:
-            dist_data = _http_get_bytes(dist_url)
-            dist_text = dist_data.decode("utf-8", errors="replace")
-        except Exception:
-            continue
-
-        match = re.search(r"<title>(.*?)</title>", dist_text, re.IGNORECASE)
-        if not match:
-            continue
-
-        if title.lower() not in match.group(1).lower():
-            continue
-
-        post_date = str(product.get("PostDate", ""))
-        candidates.append((post_date, pkg_url))
-
-    if not candidates:
-        raise DownloadError(
-            f"No installer found for '{macos}' in Apple software catalog."
-        )
-
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-
-
-def _http_get_bytes(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "osx-proxmox-next"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read()
-    except Exception as exc:
-        raise DownloadError(f"Failed to fetch {url}: {exc}") from exc
-
-
-def _extract_sharedsupport_dmg(pkg_path: Path, dest_dir: Path) -> Path:
-    dmg_dest = dest_dir / "tahoe-SharedSupport.dmg"
-    try:
-        offset, size = _find_xar_entry(pkg_path, "SharedSupport.dmg")
-    except Exception as exc:
-        raise DownloadError(f"Failed to parse installer package: {exc}") from exc
-
-    try:
-        with open(pkg_path, "rb") as src, open(dmg_dest, "wb") as dst:
-            src.seek(offset)
-            remaining = size
-            while remaining > 0:
-                chunk = src.read(min(_CHUNK_SIZE, remaining))
-                if not chunk:
-                    break
-                dst.write(chunk)
-                remaining -= len(chunk)
-    except Exception as exc:
-        dmg_dest.unlink(missing_ok=True)
-        raise DownloadError(f"Failed to extract SharedSupport.dmg: {exc}") from exc
-
-    return dmg_dest
-
-
-def _find_xar_entry(pkg_path: Path, entry_name: str) -> tuple[int, int]:
-    import struct
-    import xml.etree.ElementTree as ET
-    import zlib as _zlib
-
-    with open(pkg_path, "rb") as f:
-        magic = f.read(4)
-        if magic != b"xar!":
-            raise DownloadError("Not a valid XAR archive.")
-        header_size = struct.unpack(">H", f.read(2))[0]
-        f.read(2)  # version
-        toc_compressed_size = struct.unpack(">Q", f.read(8))[0]
-        f.read(8)  # toc_uncompressed_size
-        f.seek(header_size)
-        toc_data = f.read(toc_compressed_size)
-
-    heap_offset = header_size + toc_compressed_size
-    toc_xml = _zlib.decompress(toc_data).decode("utf-8")
-    root = ET.fromstring(toc_xml)
-
-    for file_el in root.iter("file"):
-        name_el = file_el.find("name")
-        if name_el is not None and name_el.text == entry_name:
-            data_el = file_el.find("data")
-            if data_el is None:
-                continue
-            data_offset = int(data_el.findtext("offset", "0"))
-            data_size = int(data_el.findtext("length", "0"))
-            return heap_offset + data_offset, data_size
-
-    raise DownloadError(f"'{entry_name}' not found inside installer package.")
 
 
 def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:
@@ -323,7 +173,9 @@ def _get_recovery_session() -> str:
     raise DownloadError("No session cookie in Apple recovery response.")
 
 
-def _get_recovery_image_info(session: str, board_id: str) -> dict[str, str]:
+def _get_recovery_image_info(
+    session: str, board_id: str, os_type: str = "default"
+) -> dict[str, str]:
     headers = {
         "Host": "osrecovery.apple.com",
         "Connection": "close",
@@ -337,7 +189,7 @@ def _get_recovery_image_info(session: str, board_id: str) -> dict[str, str]:
         "bid": board_id,
         "k": _generate_id(64),
         "fg": _generate_id(64),
-        "os": "default",
+        "os": os_type,
     }
     body = "\n".join(f"{k}={v}" for k, v in post_data.items()).encode()
     req = urllib.request.Request(_OSRECOVERY_IMAGE_URL, data=body, headers=headers)

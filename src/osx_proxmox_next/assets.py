@@ -34,10 +34,10 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
     recovery_path = resolve_recovery_or_installer_path(config)
     checks.append(
         AssetCheck(
-            name="Installer / recovery image",
+            name="Recovery image",
             path=recovery_path,
             ok=recovery_path.exists(),
-            hint="Tahoe should use a full installer image path.",
+            hint="Provide recovery image or run auto-download.",
             downloadable=True,
         )
     )
@@ -46,19 +46,11 @@ def required_assets(config: VmConfig) -> list[AssetCheck]:
 
 def suggested_fetch_commands(config: VmConfig) -> list[str]:
     iso_root = "/var/lib/vz/template/iso"
-    if config.macos == "tahoe":
-        commands = [
-            f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
-            f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
-            f"# Tahoe: full installer (~16GB) downloaded from Apple catalog",
-        ]
-    else:
-        commands = [
-            f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
-            f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
-            f"# Or place recovery image at {iso_root}/{config.macos}-recovery.iso",
-        ]
-    return commands
+    return [
+        f"# Auto-download available — run: osx-next-cli download --macos {config.macos}",
+        f"# Or manually place OpenCore image at {iso_root}/opencore-{config.macos}.iso",
+        f"# Or place recovery image at {iso_root}/{config.macos}-recovery.iso",
+    ]
 
 
 def resolve_opencore_path(macos: str) -> Path:
@@ -77,23 +69,6 @@ def resolve_opencore_path(macos: str) -> Path:
 def resolve_recovery_or_installer_path(config: VmConfig) -> Path:
     if config.installer_path:
         return Path(config.installer_path)
-    if config.macos == "tahoe":
-        match = _find_iso([
-            "tahoe-full-installer.img",
-            "tahoe-full-installer.iso",
-            "tahoe-installer.iso",
-            "tahoe-installer.img",
-            "macos-tahoe-full*.iso",
-            "macos-tahoe-full*.img",
-            "*tahoe*full*.iso",
-            "*tahoe*full*.img",
-            "*tahoe*.iso",
-            "*tahoe*.img",
-            "InstallAssistant-tahoe*.iso",
-            "InstallAssistant*.iso",
-        ])
-        if match:
-            return match
     match = _find_iso([
         f"{config.macos}-recovery.iso",
         f"{config.macos}-recovery.img",
