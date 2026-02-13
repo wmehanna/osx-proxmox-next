@@ -551,6 +551,7 @@ class NextApp(App):
         else:
             self._set_wizard_status("Downloads complete. Re-checking assets...")
             self._check_assets()
+            self.action_generate_plan()
             self.notify("Assets downloaded successfully", severity="information")
 
     def _refresh_health(self) -> None:

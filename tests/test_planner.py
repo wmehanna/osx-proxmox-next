@@ -21,6 +21,9 @@ def test_build_plan_includes_core_steps() -> None:
     titles = [step.title for step in steps]
     assert "Create VM shell" in titles
     assert "Apply macOS hardware profile" in titles
+    assert "Build OpenCore boot disk" in titles
+    assert "Import and attach OpenCore disk" in titles
+    assert "Import and attach macOS recovery" in titles
     assert "Set boot order" in titles
     assert any(step.command.startswith("qm start") for step in steps)
 
@@ -44,7 +47,7 @@ def test_render_script_contains_metadata() -> None:
 def test_build_plan_boot_order_is_shell_safe() -> None:
     steps = build_plan(_cfg("sequoia"))
     boot = next(step for step in steps if step.title == "Set boot order")
-    assert "--boot 'order=ide2;ide3;sata0'" in boot.command
+    assert "--boot 'order=ide2;sata0;ide0'" in boot.command
 
 
 def test_build_plan_sets_applesmc_args() -> None:
@@ -86,7 +89,7 @@ def test_build_plan_uses_provided_smbios() -> None:
     assert f"product={base64.b64encode(b'MacPro7,1').decode()}" in smbios_step.command
 
 
-def test_build_plan_uses_storage_iso_refs(monkeypatch) -> None:
+def test_build_plan_uses_importdisk_for_opencore(monkeypatch) -> None:
     from pathlib import Path
     import osx_proxmox_next.planner as planner
 
@@ -99,10 +102,27 @@ def test_build_plan_uses_storage_iso_refs(monkeypatch) -> None:
     cfg = _cfg("tahoe")
     cfg.installer_path = ""
     steps = build_plan(cfg)
-    opencore = next(step for step in steps if step.title == "Attach OpenCore ISO")
-    installer = next(step for step in steps if step.title == "Attach macOS recovery ISO")
-    assert "wd2tb:iso/opencore-tahoe.iso,media=cdrom" in opencore.command
-    assert "wd2tb:iso/macos-tahoe-full.iso" in installer.command
+    oc = next(step for step in steps if step.title == "Import and attach OpenCore disk")
+    assert "qm importdisk" in oc.command
+    assert "opencore-tahoe-vm901.img" in oc.command
+    assert "media=disk" in oc.command
+
+
+def test_build_plan_uses_importdisk_for_recovery(monkeypatch) -> None:
+    from pathlib import Path
+    import osx_proxmox_next.planner as planner
+
+    monkeypatch.setattr(
+        planner,
+        "resolve_recovery_or_installer_path",
+        lambda _cfg: Path("/var/lib/vz/template/iso/sonoma-recovery.img"),
+    )
+    cfg = _cfg("sonoma")
+    steps = build_plan(cfg)
+    recovery = next(step for step in steps if step.title == "Import and attach macOS recovery")
+    assert "qm importdisk" in recovery.command
+    assert "sonoma-recovery.img" in recovery.command
+    assert "media=disk" in recovery.command
 
 
 def test_smbios_model_fallback():
@@ -114,6 +134,42 @@ def test_smbios_model_fallback():
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
     assert f"product={base64.b64encode(b'iMacPro1,1').decode()}" in smbios_step.command
+
+
+def test_build_plan_includes_build_oc_step() -> None:
+    steps = build_plan(_cfg("sequoia"))
+    titles = [step.title for step in steps]
+    assert "Build OpenCore boot disk" in titles
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "losetup" in build.command
+    assert "ScanPolicy" in build.command
+    assert "DmgLoading" in build.command
+    assert "sgdisk" in build.command
+    # Verify ordering: build comes before import OC, before recovery
+    build_idx = titles.index("Build OpenCore boot disk")
+    oc_idx = titles.index("Import and attach OpenCore disk")
+    recovery_idx = titles.index("Import and attach macOS recovery")
+    assert build_idx < oc_idx < recovery_idx
+
+
+def test_build_plan_recovery_uses_importdisk(monkeypatch) -> None:
+    """Recovery images (.img and .iso) are always imported as disk."""
+    from pathlib import Path
+    import osx_proxmox_next.planner as planner
+
+    for suffix in (".iso", ".img"):
+        monkeypatch.setattr(
+            planner,
+            "resolve_recovery_or_installer_path",
+            lambda _cfg, s=suffix: Path(f"/var/lib/vz/template/iso/sonoma-recovery{s}"),
+        )
+        cfg = _cfg("sonoma")
+        steps = build_plan(cfg)
+        titles = [s.title for s in steps]
+        assert "Import and attach macOS recovery" in titles
+        recovery = next(s for s in steps if s.title == "Import and attach macOS recovery")
+        assert "qm importdisk" in recovery.command
+        assert "media=disk" in recovery.command
 
 
 def test_smbios_values_are_base64_encoded():
@@ -129,3 +185,11 @@ def test_smbios_values_are_base64_encoded():
     encoded = base64.b64encode(b"MacPro7,1").decode()
     assert f"product={encoded}," in smbios_step.command
     assert "MacPro7,1" not in smbios_step.command
+
+
+def test_render_script_simple() -> None:
+    cfg = _cfg("sequoia")
+    script = render_script(cfg, build_plan(cfg))
+    assert "#!/usr/bin/env bash" in script
+    assert "qm create 901" in script
+    assert "Build OpenCore boot disk" in script

@@ -31,7 +31,7 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 **You get:**
 - 🧙 A step-by-step TUI wizard: **Preflight > Configure > Review > Dry Run > Live Apply**
 - 🔍 Auto-detected hardware defaults (CPU cores, RAM, storage targets)
-- 💿 Automatic OpenCore and recovery/installer ISO detection
+- 💿 Automatic OpenCore and recovery/installer ISO detection + auto-download
 - 🆔 Auto-generated SMBIOS identity (serial, UUID, model) — no OpenCore editing needed
 - 🛡️ Safe dry-run mode to preview every command before execution
 - 🚫 Validation that blocks live apply when required assets are missing
@@ -114,6 +114,9 @@ Look for `constant_tsc` and `nonstop_tsc` in the output.
 For scripting or headless use, the CLI bypasses the TUI entirely:
 
 ```bash
+# Download OpenCore + recovery images
+osx-next-cli download --macos sonoma
+
 # Check host readiness
 osx-next-cli preflight
 
@@ -162,16 +165,18 @@ In the macOS installer:
 <details>
 <summary>🚫 <strong>Live apply is blocked — missing assets</strong></summary>
 
-The tool requires OpenCore and recovery/installer ISOs in your Proxmox ISO storage. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
-- `opencore-v21.iso` or `opencore-{version}.iso`
-- `{version}-recovery.iso`
+The tool requires OpenCore and recovery/installer images. It scans `/var/lib/vz/template/iso` and `/mnt/pve/*/template/iso` for:
+- `opencore-osx-proxmox-vm.iso` or `opencore-{version}.iso`
+- `{version}-recovery.img` or `{version}-recovery.iso`
 - For Tahoe: a full installer ISO matching `*tahoe*full*.iso` or `*InstallAssistant*.iso`
+
+Use `osx-next-cli download --macos sonoma` to auto-fetch missing assets, or click **Download Missing** in the TUI.
 </details>
 
 <details>
 <summary>🐚 <strong>I see UEFI Shell instead of macOS boot</strong></summary>
 
-Boot media path or order mismatch. Ensure OpenCore is on `ide2` and recovery/installer on `ide3`, with boot order set to `ide2;ide3;sata0`.
+Boot media path or order mismatch. Ensure OpenCore is on `ide0` and recovery on `ide2`, with boot order set to `ide2;sata0;ide0`.
 </details>
 
 <details>
@@ -202,7 +207,7 @@ Host-side setup is manual and required before the VM can use a discrete GPU.
 
 - 💿 Use **SSD/NVMe-backed storage** for VM disks
 - 🧠 Don't overcommit host CPU or RAM
-- 🔧 Keep the main macOS disk on `sata0`, OpenCore on `ide2`, recovery on `ide3`
+- 🔧 Keep the main macOS disk on `sata0`, OpenCore on `ide0`, recovery on `ide2`
 - 🖥️ Use `vga: std` during installation (switch after)
 - 📏 Change one setting at a time and measure the impact
 
@@ -322,6 +327,7 @@ src/osx_proxmox_next/
   planner.py      # qm command generation
   executor.py     # Dry-run and live execution engine
   assets.py       # OpenCore/installer ISO detection
+  downloader.py   # Auto-download OpenCore + recovery images
   defaults.py     # Host-aware hardware defaults
   preflight.py    # Host capability checks
   rollback.py     # VM snapshot/rollback hints

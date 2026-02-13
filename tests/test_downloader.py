@@ -14,9 +14,13 @@ from osx_proxmox_next.downloader import (
     DownloadProgress,
     download_opencore,
     download_recovery,
+    _build_recovery_image,
     _download_file,
+    _download_file_with_token,
     _fetch_github_release,
     _find_release_asset,
+    _get_recovery_session,
+    _get_recovery_image_info,
 )
 
 
@@ -131,7 +135,7 @@ class TestDownloadRecovery:
             download_recovery("tahoe", tmp_path)
 
     def test_unknown_macos_rejected(self, tmp_path):
-        with pytest.raises(DownloadError, match="No recovery catalog entry"):
+        with pytest.raises(DownloadError, match="No recovery board ID"):
             download_recovery("unknown_os", tmp_path)
 
     def test_existing_file_skips_download(self, tmp_path):
@@ -142,44 +146,48 @@ class TestDownloadRecovery:
         assert result == existing
 
     def test_success(self, tmp_path, monkeypatch):
-        import gzip
-        import plistlib
+        session_resp = _make_response(b"")
+        session_resp.headers = {"Set-Cookie": "session=ABC123; path=/; HttpOnly"}
 
-        catalog = {
-            "Products": {
-                "prod1": {
-                    "Packages": [
-                        {"URL": "https://apple.com/BaseSystem.dmg", "Size": 500},
-                    ],
-                    "ExtendedMetaInfo": {
-                        "InstallAssistantPackageIdentifiers": {
-                            "SharedSupport": "com.apple.pkg.InstallAssistant.macOS15"
-                        }
-                    },
-                }
-            }
-        }
-        catalog_xml = plistlib.dumps(catalog)
-        catalog_gz = gzip.compress(catalog_xml)
-        catalog_resp = _make_response(catalog_gz)
+        image_info_resp = _make_response(
+            b"AP: 041-00000\nAU: https://oscdn.apple.com/BaseSystem.dmg\n"
+            b"AH: abc123\nAT: TOKEN123\nCU: https://oscdn.apple.com/BaseSystem.chunklist\n"
+            b"CH: def456\nCT: TOKEN456\n"
+        )
 
-        file_data = b"basesystem-dmg-content"
-        file_resp = _make_chunked_response([file_data], len(file_data))
+        dmg_data = b"basesystem-dmg-content"
+        dmg_resp = _make_chunked_response([dmg_data], len(dmg_data))
+        chunklist_data = b"chunklist-content"
+        chunklist_resp = _make_chunked_response([chunklist_data], len(chunklist_data))
 
         call_count = [0]
 
         def fake_urlopen(req, timeout=None):
             call_count[0] += 1
             if call_count[0] == 1:
-                return catalog_resp
-            return file_resp
+                return session_resp
+            if call_count[0] == 2:
+                return image_info_resp
+            if call_count[0] == 3:
+                return dmg_resp
+            return chunklist_resp
 
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", fake_urlopen)
         monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
 
-        result = download_recovery("sequoia", tmp_path)
-        assert result == tmp_path / "sequoia-recovery.img"
+        def fake_build_recovery_image(dmg_path, chunklist_path, dest):
+            assert dmg_path.exists()
+            assert chunklist_path.exists()
+            dest.write_bytes(b"built-recovery-image")
+
+        monkeypatch.setattr(dl_module, "_build_recovery_image", fake_build_recovery_image)
+
+        result = download_recovery("sonoma", tmp_path)
+        assert result == tmp_path / "sonoma-recovery.img"
         assert result.exists()
+        # Intermediate files should be cleaned up
+        assert not (tmp_path / "sonoma-BaseSystem.dmg").exists()
+        assert not (tmp_path / "sonoma-BaseSystem.chunklist").exists()
 
 
 class TestDownloadFile:
@@ -208,7 +216,7 @@ class TestDownloadFile:
         original_do_download = dl_module._do_download
         call_count = [0]
 
-        def failing_do_download(url, dest, on_progress, phase):
+        def failing_do_download(url, dest, on_progress, phase, extra_headers=None):
             call_count[0] += 1
             # Write partial data then fail
             dest.write_bytes(b"partial data")
@@ -330,132 +338,236 @@ class TestHttpGetJson:
             _http_get_json("https://api.github.com/repos/test/releases/latest")
 
 
-class TestFindBaseSystemUrl:
-    def test_catalog_fetch_error(self, monkeypatch):
-        from osx_proxmox_next.downloader import _find_base_system_url
+class TestGetRecoverySession:
+    def test_success(self, monkeypatch):
+        resp = _make_response(b"")
+        resp.headers = {"Set-Cookie": "session=ABC123; path=/; HttpOnly"}
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
 
+        result = _get_recovery_session()
+        assert result == "session=ABC123"
+
+    def test_network_error(self, monkeypatch):
         def fail(req, timeout=None):
             raise ConnectionError("no network")
 
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", fail)
 
-        with pytest.raises(DownloadError, match="Failed to fetch Apple catalog"):
-            _find_base_system_url("https://example.com/catalog.gz", "Mac-ABC")
+        with pytest.raises(DownloadError, match="Failed to get recovery session"):
+            _get_recovery_session()
 
-    def test_bad_plist(self, monkeypatch):
-        from osx_proxmox_next.downloader import _find_base_system_url
-
-        resp = _make_response(b"not valid plist data")
+    def test_session_after_other_parts(self, monkeypatch):
+        """Session cookie found after non-session parts in Set-Cookie."""
+        resp = _make_response(b"")
+        resp.headers = {"Set-Cookie": "path=/; HttpOnly; session=XYZ789"}
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
 
-        with pytest.raises(DownloadError, match="Failed to parse Apple catalog"):
-            _find_base_system_url("https://example.com/catalog.gz", "Mac-ABC")
+        result = _get_recovery_session()
+        assert result == "session=XYZ789"
 
-    def test_no_basesystem_in_catalog(self, monkeypatch):
-        import gzip
-        import plistlib
-        from osx_proxmox_next.downloader import _find_base_system_url
-
-        catalog = {
-            "Products": {
-                "prod1": {
-                    "Packages": [
-                        {"URL": "https://apple.com/other.pkg"},
-                    ],
-                }
-            }
-        }
-        catalog_xml = plistlib.dumps(catalog)
-        catalog_gz = gzip.compress(catalog_xml)
-        resp = _make_response(catalog_gz)
+    def test_no_session_in_cookie_parts(self, monkeypatch):
+        """Set-Cookie header exists but has no session= part."""
+        resp = _make_response(b"")
+        resp.headers = {"Set-Cookie": "path=/; HttpOnly; other=value"}
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
 
-        with pytest.raises(DownloadError, match="Could not find BaseSystem.dmg"):
-            _find_base_system_url("https://example.com/catalog.gz", "Mac-ZZZZZ")
+        with pytest.raises(DownloadError, match="No session cookie"):
+            _get_recovery_session()
 
-    def test_board_id_match(self, monkeypatch):
-        import gzip
-        import plistlib
-        from osx_proxmox_next.downloader import _find_base_system_url
-
-        catalog = {
-            "Products": {
-                "prod1": {
-                    "Packages": [
-                        {"URL": "https://apple.com/BaseSystem.dmg"},
-                    ],
-                    "ExtendedMetaInfo": {
-                        "InstallAssistantPackageIdentifiers": {
-                            "SharedSupport": "Mac-27AD2F918AE68F61"
-                        }
-                    },
-                },
-                "prod2": {
-                    "Packages": [
-                        {"URL": "https://apple.com/other-BaseSystem.dmg"},
-                    ],
-                    "ExtendedMetaInfo": {},
-                },
-            }
-        }
-        catalog_xml = plistlib.dumps(catalog)
-        catalog_gz = gzip.compress(catalog_xml)
-        resp = _make_response(catalog_gz)
+    def test_no_session_cookie(self, monkeypatch):
+        resp = _make_response(b"")
+        resp.headers = {"Content-Type": "text/html"}
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
 
-        result = _find_base_system_url("https://example.com/catalog.gz", "Mac-27AD2F918AE68F61")
-        assert result == "https://apple.com/BaseSystem.dmg"
+        with pytest.raises(DownloadError, match="No session cookie"):
+            _get_recovery_session()
 
-    def test_uncompressed_catalog(self, monkeypatch):
-        import plistlib
-        from osx_proxmox_next.downloader import _find_base_system_url
 
-        catalog = {
-            "Products": {
-                "prod1": {
-                    "Packages": [
-                        {"URL": "https://apple.com/BaseSystem.dmg"},
-                    ],
-                    "ExtendedMetaInfo": {
-                        "InstallAssistantPackageIdentifiers": {
-                            "SharedSupport": "Mac-TESTBOARD"
-                        }
-                    },
-                }
-            }
-        }
-        catalog_xml = plistlib.dumps(catalog)
-        # Send uncompressed data (not gzipped)
-        resp = _make_response(catalog_xml)
+class TestGetRecoveryImageInfo:
+    def test_success(self, monkeypatch):
+        resp = _make_response(
+            b"AP: 041-00000\nAU: https://oscdn.apple.com/BaseSystem.dmg\n"
+            b"AH: abc123\nAT: TOKEN123\nCU: https://oscdn.apple.com/chunklist\n"
+            b"CH: def456\nCT: TOKEN456\n"
+        )
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
 
-        result = _find_base_system_url("https://example.com/catalog.xml", "Mac-TESTBOARD")
-        assert "BaseSystem.dmg" in result
+        result = _get_recovery_image_info("session=ABC", "Mac-827FAC58A8FDFA22")
+        assert result["AU"] == "https://oscdn.apple.com/BaseSystem.dmg"
+        assert result["AT"] == "TOKEN123"
 
-    def test_fallback_candidate_when_no_board_match(self, monkeypatch):
-        """When board_id doesn't match any product, falls back to first BaseSystem.dmg found."""
-        import gzip
-        import plistlib
-        from osx_proxmox_next.downloader import _find_base_system_url
+    def test_network_error(self, monkeypatch):
+        def fail(req, timeout=None):
+            raise ConnectionError("no network")
 
-        catalog = {
-            "Products": {
-                "prod1": {
-                    "Packages": [
-                        {"URL": "https://apple.com/fallback-BaseSystem.dmg"},
-                    ],
-                    "ExtendedMetaInfo": {
-                        "InstallAssistantPackageIdentifiers": {
-                            "SharedSupport": "Mac-DIFFERENT"
-                        }
-                    },
-                }
-            }
-        }
-        catalog_xml = plistlib.dumps(catalog)
-        catalog_gz = gzip.compress(catalog_xml)
-        resp = _make_response(catalog_gz)
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fail)
+
+        with pytest.raises(DownloadError, match="Failed to get recovery image info"):
+            _get_recovery_image_info("session=ABC", "Mac-TEST")
+
+    def test_missing_required_key_at(self, monkeypatch):
+        resp = _make_response(b"AP: 041-00000\nAU: https://example.com/img\n")
         monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
 
-        result = _find_base_system_url("https://example.com/catalog.gz", "Mac-NOMATCH")
-        assert result == "https://apple.com/fallback-BaseSystem.dmg"
+        with pytest.raises(DownloadError, match="Missing key 'AT'"):
+            _get_recovery_image_info("session=ABC", "Mac-TEST")
+
+    def test_missing_required_key_cu(self, monkeypatch):
+        resp = _make_response(b"AU: https://example.com/img\nAT: TOKEN\n")
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
+
+        with pytest.raises(DownloadError, match="Missing key 'CU'"):
+            _get_recovery_image_info("session=ABC", "Mac-TEST")
+
+    def test_ignores_lines_without_separator(self, monkeypatch):
+        resp = _make_response(
+            b"no-separator-line\nAU: https://example.com/img\nAT: TOKEN\n"
+            b"CU: https://example.com/chunklist\nCT: CTOKEN\n"
+        )
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: resp)
+
+        result = _get_recovery_image_info("session=ABC", "Mac-TEST")
+        assert result["AU"] == "https://example.com/img"
+        assert result["AT"] == "TOKEN"
+
+
+class TestDownloadFileWithToken:
+    def test_success(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        file_data = b"recovery-data"
+        file_resp = _make_chunked_response([file_data], len(file_data))
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: file_resp)
+
+        dest = tmp_path / "recovery.img"
+        _download_file_with_token("https://oscdn.apple.com/BaseSystem.dmg", "TOKEN", dest, None, "recovery")
+        assert dest.exists()
+        assert dest.read_bytes() == file_data
+
+    def test_retry_and_fail(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        def fail(req, timeout=None):
+            raise ConnectionError("network failure")
+
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", fail)
+
+        dest = tmp_path / "recovery.img"
+        with pytest.raises(DownloadError, match="Download failed after"):
+            _download_file_with_token("https://oscdn.apple.com/img", "TOKEN", dest, None, "recovery")
+        assert not dest.exists()
+
+    def test_partial_cleanup(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        def failing_do_download(url, dest, on_progress, phase, extra_headers=None):
+            dest.write_bytes(b"partial data")
+            raise ConnectionError("mid-download failure")
+
+        monkeypatch.setattr(dl_module, "_do_download", failing_do_download)
+
+        dest = tmp_path / "recovery.img"
+        with pytest.raises(DownloadError, match="Download failed after"):
+            _download_file_with_token("https://oscdn.apple.com/img", "TOKEN", dest, None, "recovery")
+        assert not dest.exists()
+        assert not (tmp_path / "recovery.img.part").exists()
+
+    def test_progress_callback(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dl_module.time, "sleep", lambda s: None)
+
+        chunk1 = b"a" * 1000
+        chunk2 = b"b" * 500
+        total = len(chunk1) + len(chunk2)
+        file_resp = _make_chunked_response([chunk1, chunk2], total)
+
+        monkeypatch.setattr(dl_module.urllib.request, "urlopen", lambda req, timeout=None: file_resp)
+
+        progress_calls: list[DownloadProgress] = []
+
+        def on_progress(p: DownloadProgress) -> None:
+            progress_calls.append(p)
+
+        dest = tmp_path / "recovery.img"
+        _download_file_with_token("https://oscdn.apple.com/img", "TOKEN", dest, on_progress, "recovery")
+        assert len(progress_calls) == 2
+        assert progress_calls[0].phase == "recovery"
+
+
+class TestBuildRecoveryImage:
+    def test_success(self, tmp_path, monkeypatch):
+        import subprocess as real_subprocess
+        from osx_proxmox_next.downloader import _build_recovery_image
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+
+        def fake_run(argv, **kw):
+            assert argv[0] == "dmg2img"
+            assert argv[1] == str(dmg)
+            assert argv[2] == str(dest)
+            dest.write_bytes(b"\x00" * 2048)
+            return real_subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+
+        _build_recovery_image(dmg, chunklist, dest)
+        assert dest.exists()
+
+    def test_failure_cleans_up(self, tmp_path, monkeypatch):
+        import subprocess as real_subprocess
+        from osx_proxmox_next.downloader import _build_recovery_image
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+        dest.write_bytes(b"partial")
+
+        def fake_run(argv, **kw):
+            raise real_subprocess.CalledProcessError(1, argv, stderr=b"dmg2img failed")
+
+        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+
+        with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
+            _build_recovery_image(dmg, chunklist, dest)
+        assert not dest.exists()
+
+    def test_failure_no_dest_to_clean(self, tmp_path, monkeypatch):
+        import subprocess as real_subprocess
+        from osx_proxmox_next.downloader import _build_recovery_image
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+
+        def fake_run(argv, **kw):
+            raise real_subprocess.CalledProcessError(1, argv, stderr=b"dmg2img failed")
+
+        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+
+        with pytest.raises(DownloadError, match="Failed to convert recovery DMG"):
+            _build_recovery_image(dmg, chunklist, dest)
+        assert not dest.exists()
+
+    def test_failure_dmg2img_not_found(self, tmp_path, monkeypatch):
+        from osx_proxmox_next.downloader import _build_recovery_image
+
+        dmg = tmp_path / "BaseSystem.dmg"
+        chunklist = tmp_path / "BaseSystem.chunklist"
+        dmg.write_bytes(b"x" * 1024)
+        chunklist.write_bytes(b"y" * 64)
+        dest = tmp_path / "recovery.img"
+
+        def fake_run(argv, **kw):
+            raise FileNotFoundError("dmg2img")
+
+        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+
+        with pytest.raises(DownloadError, match="dmg2img is required but not installed"):
+            _build_recovery_image(dmg, chunklist, dest)

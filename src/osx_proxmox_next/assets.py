@@ -64,8 +64,6 @@ def suggested_fetch_commands(config: VmConfig) -> list[str]:
 def resolve_opencore_path(macos: str) -> Path:
     match = _find_iso(
         [
-            "OpenCore-v21.iso",
-            "opencore-v21.iso",
             "opencore-osx-proxmox-vm.iso",
             f"opencore-{macos}.iso",
             f"opencore*{macos}*.iso",
@@ -97,21 +95,20 @@ def resolve_recovery_or_installer_path(config: VmConfig) -> Path:
 def _find_iso(patterns: list[str]) -> Path | None:
     roots = [
         Path("/var/lib/vz/template/iso"),
-        Path("/root/OSX-PROXMOX/EFI"),
-        Path("/root/OSX-PROXMOX-fork/EFI"),
     ]
     mnt_pve = Path("/mnt/pve")
     if mnt_pve.exists():
         for entry in sorted(mnt_pve.iterdir()):
             roots.append(entry / "template" / "iso")
-    for root in roots:
-        if not root.exists():
-            continue
-        lowered = [p.lower() for p in patterns]
-        for candidate in sorted(root.iterdir()):
-            if not candidate.is_file():
+    # Try patterns in priority order so exact names match before globs
+    lowered = [p.lower() for p in patterns]
+    for pattern in lowered:
+        for root in roots:
+            if not root.exists():
                 continue
-            name = candidate.name.lower()
-            if any(fnmatch(name, pattern) for pattern in lowered):
-                return candidate
+            for candidate in sorted(root.iterdir()):
+                if not candidate.is_file():
+                    continue
+                if fnmatch(candidate.name.lower(), pattern):
+                    return candidate
     return None

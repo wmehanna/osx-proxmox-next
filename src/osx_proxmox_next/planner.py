@@ -25,8 +25,9 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     meta = SUPPORTED_MACOS[config.macos]
     vmid = str(config.vmid)
 
-    recovery_path = _to_iso_ref(resolve_recovery_or_installer_path(config))
-    opencore_source = _to_iso_ref(resolve_opencore_path(config.macos))
+    recovery_raw = resolve_recovery_or_installer_path(config)
+    opencore_path = resolve_opencore_path(config.macos)
+    oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
 
     steps = [
         PlanStep(
@@ -48,7 +49,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=[
                 "qm", "set", vmid,
                 "--args",
-                "-device isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc "
+                '-device isa-applesmc,osk="ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc" '
                 "-smbios type=2 -device qemu-xhci -device usb-kbd -device usb-tablet "
                 "-global nec-usb-xhci.msi=off -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off "
                 "-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc",
@@ -71,16 +72,33 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             argv=["qm", "set", vmid, "--sata0", f"{config.storage}:{config.disk_gb}"],
         ),
         PlanStep(
-            title="Attach OpenCore ISO",
-            argv=["qm", "set", vmid, "--ide2", f"{opencore_source},media=cdrom"],
+            title="Build OpenCore boot disk",
+            argv=[
+                "bash", "-c",
+                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk),
+            ],
         ),
         PlanStep(
-            title="Attach macOS recovery ISO",
-            argv=["qm", "set", vmid, "--ide3", f"{recovery_path},media=cdrom"],
+            title="Import and attach OpenCore disk",
+            argv=[
+                "bash", "-c",
+                f"REF=$(qm importdisk {vmid} {oc_disk} {config.storage} 2>&1 | "
+                "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
+                f"qm set {vmid} --ide0 $REF,media=disk",
+            ],
+        ),
+        PlanStep(
+            title="Import and attach macOS recovery",
+            argv=[
+                "bash", "-c",
+                f"REF=$(qm importdisk {vmid} {recovery_raw} {config.storage} 2>&1 | "
+                "grep 'successfully imported' | grep -oP \"'\\K[^']+\") && "
+                f"qm set {vmid} --ide2 $REF,media=disk",
+            ],
         ),
         PlanStep(
             title="Set boot order",
-            argv=["qm", "set", vmid, "--boot", "order=ide2;ide3;sata0"],
+            argv=["qm", "set", vmid, "--boot", "order=ide2;sata0;ide0"],
         ),
         PlanStep(
             title="Start VM",
@@ -123,6 +141,38 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
     return "\n".join(lines)
 
 
+def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path) -> str:
+    """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
+    return (
+        # Create 1GB GPT disk with EFI System Partition
+        f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
+        f"sgdisk -Z {dest} && "
+        f"sgdisk -n 1:0:0 -t 1:EF00 {dest} && "
+        # Mount source OpenCore (raw FAT32 — no partition table)
+        f"SRC_LOOP=$(losetup --find --show {opencore_path}) && "
+        "mkdir -p /tmp/oc-src && mount $SRC_LOOP /tmp/oc-src && "
+        # Format and mount dest ESP
+        f"DEST_LOOP=$(losetup --find --show -P {dest}) && "
+        "mkfs.fat -F 32 ${DEST_LOOP}p1 && "
+        "mkdir -p /tmp/oc-dest && mount ${DEST_LOOP}p1 /tmp/oc-dest && "
+        # Copy OpenCore files
+        "cp -a /tmp/oc-src/* /tmp/oc-dest/ && "
+        # Patch config.plist with plistlib
+        "python3 -c '"
+        "import plistlib; "
+        "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
+        "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
+        "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
+        "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
+        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x26\\x0f\\x00\\x00\"; "
+        "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
+        "print(\"config.plist patched\")' && "
+        # Cleanup mounts
+        "umount /tmp/oc-src && losetup -d $SRC_LOOP && "
+        "umount /tmp/oc-dest && losetup -d $DEST_LOOP"
+    )
+
+
 def _encode_smbios_value(value: str) -> str:
     """Base64-encode a value for Proxmox smbios1 fields."""
     import base64
@@ -160,13 +210,3 @@ def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
             argv=["qm", "set", vmid, "--smbios1", smbios_value],
         ),
     ]
-
-
-def _to_iso_ref(path: Path) -> str:
-    if str(path).startswith("/var/lib/vz/template/iso/"):
-        return f"local:iso/{path.name}"
-    parts = path.parts
-    if len(parts) >= 6 and parts[0:3] == ("/", "mnt", "pve") and parts[-2] == "iso":
-        storage = parts[3]
-        return f"{storage}:iso/{path.name}"
-    return str(path)
