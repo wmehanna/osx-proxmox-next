@@ -36,7 +36,30 @@ This tool automates macOS virtual machine creation on Proxmox VE 9. It handles V
 - 🛡️ Mandatory dry-run before live install previews every command
 - 🚫 Real-time form validation with inline error feedback
 
-![Wizard Screenshot](docs/images/wizard-step2.png)
+### TUI Preview
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/step1-os-selection.png" alt="Step 1: OS Selection" width="400"><br>
+      <strong>Step 1:</strong> OS Selection
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/step2-storage-selection.png" alt="Step 2: Storage Selection" width="400"><br>
+      <strong>Step 2:</strong> Storage Selection
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/step3-vm-configuration.png" alt="Step 3: VM Configuration" width="400"><br>
+      <strong>Step 3:</strong> VM Configuration
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/step4-review-dry-run.png" alt="Step 4: Review & Dry Run" width="400"><br>
+      <strong>Step 4:</strong> Review & Dry Run
+    </td>
+  </tr>
+</table>
 
 ![macOS Desktop via VNC](docs/images/macos-vnc-desktop.png)
 
