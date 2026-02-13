@@ -4,7 +4,6 @@ import gzip
 import plistlib
 import random
 import re
-import shutil
 import string
 import subprocess
 import time
@@ -199,33 +198,60 @@ def _http_get_bytes(url: str) -> bytes:
 
 
 def _extract_sharedsupport_dmg(pkg_path: Path, dest_dir: Path) -> Path:
-    extract_dir = dest_dir / "tahoe-pkg-extract"
-    try:
-        subprocess.run(
-            ["7z", "x", str(pkg_path), f"-o{extract_dir}", "SharedSupport.dmg", "-r"],
-            check=True,
-            capture_output=True,
-        )
-    except FileNotFoundError:
-        raise DownloadError(
-            "7z is required but not installed. "
-            "Install it with: apt install p7zip-full"
-        )
-    except subprocess.CalledProcessError as exc:
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir, ignore_errors=True)
-        raise DownloadError(f"Failed to extract installer package: {exc.stderr}") from exc
-
-    found = list(extract_dir.rglob("SharedSupport.dmg"))
-    if not found:
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        raise DownloadError("SharedSupport.dmg not found inside installer package.")
-
     dmg_dest = dest_dir / "tahoe-SharedSupport.dmg"
-    shutil.move(str(found[0]), str(dmg_dest))
-    shutil.rmtree(extract_dir, ignore_errors=True)
+    try:
+        offset, size = _find_xar_entry(pkg_path, "SharedSupport.dmg")
+    except Exception as exc:
+        raise DownloadError(f"Failed to parse installer package: {exc}") from exc
+
+    try:
+        with open(pkg_path, "rb") as src, open(dmg_dest, "wb") as dst:
+            src.seek(offset)
+            remaining = size
+            while remaining > 0:
+                chunk = src.read(min(_CHUNK_SIZE, remaining))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                remaining -= len(chunk)
+    except Exception as exc:
+        dmg_dest.unlink(missing_ok=True)
+        raise DownloadError(f"Failed to extract SharedSupport.dmg: {exc}") from exc
 
     return dmg_dest
+
+
+def _find_xar_entry(pkg_path: Path, entry_name: str) -> tuple[int, int]:
+    import struct
+    import xml.etree.ElementTree as ET
+    import zlib as _zlib
+
+    with open(pkg_path, "rb") as f:
+        magic = f.read(4)
+        if magic != b"xar!":
+            raise DownloadError("Not a valid XAR archive.")
+        header_size = struct.unpack(">H", f.read(2))[0]
+        f.read(2)  # version
+        toc_compressed_size = struct.unpack(">Q", f.read(8))[0]
+        f.read(8)  # toc_uncompressed_size
+        f.seek(header_size)
+        toc_data = f.read(toc_compressed_size)
+
+    heap_offset = header_size + toc_compressed_size
+    toc_xml = _zlib.decompress(toc_data).decode("utf-8")
+    root = ET.fromstring(toc_xml)
+
+    for file_el in root.iter("file"):
+        name_el = file_el.find("name")
+        if name_el is not None and name_el.text == entry_name:
+            data_el = file_el.find("data")
+            if data_el is None:
+                continue
+            data_offset = int(data_el.findtext("offset", "0"))
+            data_size = int(data_el.findtext("length", "0"))
+            return heap_offset + data_offset, data_size
+
+    raise DownloadError(f"'{entry_name}' not found inside installer package.")
 
 
 def _build_recovery_image(dmg_path: Path, _chunklist_path: Path, dest: Path) -> None:

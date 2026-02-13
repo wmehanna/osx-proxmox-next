@@ -25,6 +25,7 @@ from osx_proxmox_next.downloader import (
     _fetch_github_release,
     _find_installer_url,
     _find_release_asset,
+    _find_xar_entry,
     _get_recovery_session,
     _get_recovery_image_info,
     _http_get_bytes,
@@ -800,81 +801,148 @@ class TestHttpGetBytes:
             _http_get_bytes("https://example.com/data")
 
 
+def _make_fake_xar(path: Path, entry_name: str, entry_data: bytes) -> None:
+    """Build a minimal XAR archive with one file entry."""
+    import struct
+    import zlib as _zlib
+
+    toc_xml = (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f"<xar><toc><file id=\"1\"><name>{entry_name}</name>"
+        f"<data><offset>0</offset><size>{len(entry_data)}</size>"
+        f"<length>{len(entry_data)}</length>"
+        f"<encoding style=\"application/octet-stream\"/></data>"
+        f"</file></toc></xar>"
+    ).encode("utf-8")
+    toc_compressed = _zlib.compress(toc_xml)
+    header = b"xar!" + struct.pack(">H", 28) + struct.pack(">H", 1)
+    header += struct.pack(">Q", len(toc_compressed))
+    header += struct.pack(">Q", len(toc_xml))
+    header += struct.pack(">I", 1)  # SHA-1
+    with open(path, "wb") as f:
+        f.write(header)
+        f.write(toc_compressed)
+        f.write(entry_data)
+
+
+class TestFindXarEntry:
+    def test_success(self, tmp_path):
+        pkg = tmp_path / "test.pkg"
+        _make_fake_xar(pkg, "SharedSupport.dmg", b"dmg-data-here")
+        offset, size = _find_xar_entry(pkg, "SharedSupport.dmg")
+        assert size == 13
+        with open(pkg, "rb") as f:
+            f.seek(offset)
+            assert f.read(size) == b"dmg-data-here"
+
+    def test_entry_not_found(self, tmp_path):
+        pkg = tmp_path / "test.pkg"
+        _make_fake_xar(pkg, "OtherFile.bin", b"data")
+        with pytest.raises(DownloadError, match="not found inside installer"):
+            _find_xar_entry(pkg, "SharedSupport.dmg")
+
+    def test_invalid_magic(self, tmp_path):
+        pkg = tmp_path / "test.pkg"
+        pkg.write_bytes(b"NOT_XAR_FILE_DATA")
+        with pytest.raises(DownloadError, match="Not a valid XAR"):
+            _find_xar_entry(pkg, "SharedSupport.dmg")
+
+    def test_entry_with_no_data_element(self, tmp_path):
+        """File entry matches name but has no <data> child — should skip."""
+        import struct
+        import zlib as _zlib
+
+        toc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<xar><toc>'
+            '<file id="1"><name>SharedSupport.dmg</name></file>'
+            '</toc></xar>'
+        ).encode("utf-8")
+        toc_compressed = _zlib.compress(toc_xml)
+        header = b"xar!" + struct.pack(">H", 28) + struct.pack(">H", 1)
+        header += struct.pack(">Q", len(toc_compressed))
+        header += struct.pack(">Q", len(toc_xml))
+        header += struct.pack(">I", 1)
+
+        pkg = tmp_path / "test.pkg"
+        with open(pkg, "wb") as f:
+            f.write(header)
+            f.write(toc_compressed)
+
+        with pytest.raises(DownloadError, match="not found inside installer"):
+            _find_xar_entry(pkg, "SharedSupport.dmg")
+
+
 class TestExtractSharedsupportDmg:
-    def test_success(self, tmp_path, monkeypatch):
+    def test_success(self, tmp_path):
         pkg_path = tmp_path / "test.pkg"
-        pkg_path.write_bytes(b"fake pkg")
-
-        def fake_run(argv, **kw):
-            extract_dir = Path(argv[3][2:])  # -o<dir>
-            inner = extract_dir / "SharedSupport.dmg"
-            inner.parent.mkdir(parents=True, exist_ok=True)
-            inner.write_bytes(b"fake dmg content")
-            return real_subprocess.CompletedProcess(argv, 0)
-
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+        dmg_content = b"fake dmg content " * 100
+        _make_fake_xar(pkg_path, "SharedSupport.dmg", dmg_content)
 
         result = _extract_sharedsupport_dmg(pkg_path, tmp_path)
         assert result == tmp_path / "tahoe-SharedSupport.dmg"
         assert result.exists()
-        assert result.read_bytes() == b"fake dmg content"
-        # Extract dir should be cleaned up
-        assert not (tmp_path / "tahoe-pkg-extract").exists()
+        assert result.read_bytes() == dmg_content
 
-    def test_7z_not_found(self, tmp_path, monkeypatch):
+    def test_no_dmg_in_pkg(self, tmp_path):
         pkg_path = tmp_path / "test.pkg"
-        pkg_path.write_bytes(b"fake pkg")
+        _make_fake_xar(pkg_path, "OtherFile.bin", b"not a dmg")
 
-        def fake_run(argv, **kw):
-            raise FileNotFoundError("7z")
-
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
-
-        with pytest.raises(DownloadError, match="7z is required but not installed"):
+        with pytest.raises(DownloadError, match="not found inside installer"):
             _extract_sharedsupport_dmg(pkg_path, tmp_path)
 
-    def test_7z_extract_fails(self, tmp_path, monkeypatch):
+    def test_corrupt_pkg(self, tmp_path):
         pkg_path = tmp_path / "test.pkg"
-        pkg_path.write_bytes(b"fake pkg")
+        pkg_path.write_bytes(b"corrupt data")
 
-        def fake_run(argv, **kw):
-            raise real_subprocess.CalledProcessError(1, argv, stderr=b"extraction error")
-
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
-
-        with pytest.raises(DownloadError, match="Failed to extract installer"):
+        with pytest.raises(DownloadError, match="Failed to parse installer"):
             _extract_sharedsupport_dmg(pkg_path, tmp_path)
 
-    def test_7z_extract_fails_cleans_extract_dir(self, tmp_path, monkeypatch):
+    def test_short_read(self, tmp_path, monkeypatch):
+        """When file is shorter than expected size, extraction stops gracefully."""
         pkg_path = tmp_path / "test.pkg"
-        pkg_path.write_bytes(b"fake pkg")
-        extract_dir = tmp_path / "tahoe-pkg-extract"
-        extract_dir.mkdir()
-        (extract_dir / "partial.bin").write_bytes(b"partial")
+        _make_fake_xar(pkg_path, "SharedSupport.dmg", b"short")
 
-        def fake_run(argv, **kw):
-            raise real_subprocess.CalledProcessError(1, argv, stderr=b"extraction error")
+        # Return a size larger than the actual data
+        file_size = pkg_path.stat().st_size
+        monkeypatch.setattr(
+            dl_module, "_find_xar_entry",
+            lambda pkg, name: (file_size - 5, 999999),
+        )
 
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+        result = _extract_sharedsupport_dmg(pkg_path, tmp_path)
+        assert result.exists()
+        assert len(result.read_bytes()) == 5  # only 5 bytes available
 
-        with pytest.raises(DownloadError, match="Failed to extract installer"):
-            _extract_sharedsupport_dmg(pkg_path, tmp_path)
-        assert not extract_dir.exists()
-
-    def test_no_dmg_in_pkg(self, tmp_path, monkeypatch):
+    def test_io_error_cleans_up(self, tmp_path, monkeypatch):
         pkg_path = tmp_path / "test.pkg"
-        pkg_path.write_bytes(b"fake pkg")
+        _make_fake_xar(pkg_path, "SharedSupport.dmg", b"data")
 
-        def fake_run(argv, **kw):
-            extract_dir = Path(argv[3][2:])
-            extract_dir.mkdir(parents=True, exist_ok=True)
-            (extract_dir / "SomeOtherFile.bin").write_bytes(b"not a dmg")
-            return real_subprocess.CompletedProcess(argv, 0)
+        monkeypatch.setattr(
+            dl_module, "_find_xar_entry",
+            lambda pkg, name: (0, 100),
+        )
+        # Seeking to offset 0 with size 100 on a small file will produce short read
+        # but won't error. Force an error by making the dest unwritable.
+        dmg_dest = tmp_path / "tahoe-SharedSupport.dmg"
 
-        monkeypatch.setattr(dl_module.subprocess, "run", fake_run)
+        original_open = open
 
-        with pytest.raises(DownloadError, match="SharedSupport.dmg not found"):
+        call_count = [0]
+
+        def failing_open(path, mode="r", *args, **kwargs):
+            if str(path) == str(dmg_dest) and "w" in mode:
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    raise OSError("disk full")
+            return original_open(path, mode, *args, **kwargs)
+
+        import builtins
+        monkeypatch.setattr(builtins, "open", failing_open)
+
+        with pytest.raises(DownloadError, match="Failed to extract SharedSupport"):
             _extract_sharedsupport_dmg(pkg_path, tmp_path)
+        assert not dmg_dest.exists()
 
 
 class TestDownloadTahoeInstaller:
