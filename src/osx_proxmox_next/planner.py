@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shlex import join
 
+from .amd_patches import serialize_patches
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
 from .defaults import detect_cpu_vendor
 from .domain import SUPPORTED_MACOS, VmConfig
@@ -39,6 +40,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
 
     cpu_flag = _cpu_args()
+    is_amd = detect_cpu_vendor() == "AMD"
 
     steps = [
         PlanStep(
@@ -86,7 +88,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Build OpenCore boot disk",
             argv=[
                 "bash", "-c",
-                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos),
+                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos, is_amd, config.cores),
             ],
         ),
         PlanStep(
@@ -155,10 +157,23 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
     return "\n".join(lines)
 
 
-def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path, macos: str) -> str:
+def _build_oc_disk_script(
+    opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
+    is_amd: bool = False, cores: int = 4,
+) -> str:
     """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
     meta = SUPPORTED_MACOS.get(macos, {})
     macos_label = meta.get("label", f"macOS {macos.title()}")
+
+    # AMD kernel patch injection — serialized as a Python literal for the inline script
+    amd_patch_block = ""
+    if is_amd:
+        serialized = serialize_patches(cores)
+        amd_patch_block = (
+            "patches=" + serialized + "; "
+            "p.setdefault(\"Kernel\",{}).setdefault(\"Patch\",[]).extend(patches); "
+        )
+
     return (
         # Create 1GB GPT disk with EFI System Partition
         f"dd if=/dev/zero of={dest} bs=1M count=1024 && "
@@ -183,6 +198,7 @@ def _build_oc_disk_script(opencore_path: Path, recovery_path: Path, dest: Path, 
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x26\\x0f\\x00\\x00\"; "
+        + amd_patch_block +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
         # Cleanup mounts
