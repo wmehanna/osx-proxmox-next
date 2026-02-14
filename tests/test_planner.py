@@ -238,6 +238,24 @@ def test_build_plan_intel_uses_host(monkeypatch) -> None:
     assert "vendor=GenuineIntel" in profile.command
 
 
+def test_build_plan_amd_injects_kernel_patches(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "Kernel" in build.command
+    assert "Patch" in build.command
+    assert "cpuid_cores_per_package" in build.command
+
+
+def test_build_plan_intel_no_kernel_patches(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "cpuid_cores_per_package" not in build.command
+
+
 # ── Destroy Plan Tests ─────────────────────────────────────────────
 
 
