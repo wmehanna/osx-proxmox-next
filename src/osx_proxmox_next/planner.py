@@ -218,6 +218,7 @@ def _build_oc_disk_script(
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"rb\"); p=plistlib.load(f); f.close(); "
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
         "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
+        "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Default\"; "
         "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "
