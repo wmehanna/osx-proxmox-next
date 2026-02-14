@@ -176,6 +176,13 @@ def _build_oc_disk_script(
             + "p.setdefault(\"Kernel\",{}); "
             "patches=" + serialized + "; "
             "p[\"Kernel\"][\"Patch\"]=patches; "
+            # AMD Booter quirks: WriteUnprotector off, RebuildAppleMemoryMap on
+            "bq=p.setdefault(\"Booter\",{}).setdefault(\"Quirks\",{}); "
+            "bq[\"EnableWriteUnprotector\"]=False; "
+            "bq[\"RebuildAppleMemoryMap\"]=True; "
+            "bq[\"SyncRuntimePermissions\"]=True; "
+            "bq[\"SetupVirtualMap\"]=False; "
+            "bq[\"DevirtualiseMmio\"]=True; "
         )
 
     return (
