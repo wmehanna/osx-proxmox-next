@@ -186,14 +186,18 @@ def _build_oc_disk_script(
             "bq[\"SetupVirtualMap\"]=False; "
             "bq[\"SyncRuntimePermissions\"]=True; "
             "bq[\"DevirtualiseMmio\"]=True; "
-            # AMD Kernel quirks — only set keys that exist in shipped OC schema
+            # AMD Kernel quirks — add DummyPowerManagement and re-sort for OC schema
             "kq=p.setdefault(\"Kernel\",{}).setdefault(\"Quirks\",{}); "
+            "kq[\"DummyPowerManagement\"]=True; "
             "kq[\"PanicNoKextDump\"]=True; "
             "kq[\"PowerTimeoutKernelPanic\"]=True; "
             "kq[\"ProvideCurrentCpuInfo\"]=True; "
             "kq[\"ForceSecureBootScheme\"]=False; "
+            # Re-sort Kernel Quirks alphabetically — OC schema validator is order-sensitive
+            "p[\"Kernel\"][\"Quirks\"]=dict(sorted(p[\"Kernel\"][\"Quirks\"].items())); "
             # Disable vector acceleration — Haswell-noTSX emulation may not support AVX properly
-            "p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{})[\"EnableVectorAcceleration\"]=False; "
+            "uq=p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{}); "
+            "uq[\"EnableVectorAcceleration\"]=False; "
         )
 
     return (
