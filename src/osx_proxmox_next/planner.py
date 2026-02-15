@@ -203,6 +203,10 @@ def _build_oc_disk_script(
             "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
             "kq[\"AppleXcpmCfgLock\"]=True; "
+            # SecureBootModel must be Disabled so OC applies kernel patches
+            # to the unsealed kernel cache.  DmgLoading=Any required to pair.
+            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
+            "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
         )
 
     return (

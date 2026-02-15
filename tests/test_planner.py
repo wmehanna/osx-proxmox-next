@@ -252,6 +252,9 @@ def test_build_plan_amd_injects_kernel_patches(monkeypatch) -> None:
     # Power management locks flipped
     assert "AppleCpuPmCfgLock" in build.command
     assert "AppleXcpmCfgLock" in build.command
+    # SecureBootModel=Disabled so patches apply to unsealed kernel
+    assert 'SecureBootModel\"]=\"Disabled\"' in build.command
+    assert 'DmgLoading\"]=\"Any\"' in build.command
 
 
 def test_build_plan_intel_no_amd_patches(monkeypatch) -> None:
