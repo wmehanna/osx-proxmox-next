@@ -193,8 +193,8 @@ def _build_oc_disk_script(
             + "p.setdefault(\"Kernel\",{}); "
             "patches=" + serialized + "; "
             "p[\"Kernel\"][\"Patch\"]=patches; "
-            # AMD Booter quirks (Dortania Zen guide)
-            "bq=p.setdefault(\"Booter\",{}).setdefault(\"Quirks\",{}); "
+            # AMD Booter quirks — only flip existing keys in shipped OC plist
+            "bq=p[\"Booter\"][\"Quirks\"]; "
             "bq[\"AvoidRuntimeDefrag\"]=True; "
             "bq[\"EnableSafeModeSlide\"]=True; "
             "bq[\"EnableWriteUnprotector\"]=False; "
@@ -203,25 +203,21 @@ def _build_oc_disk_script(
             "bq[\"SetupVirtualMap\"]=False; "
             "bq[\"SyncRuntimePermissions\"]=True; "
             "bq[\"DevirtualiseMmio\"]=True; "
-            # AMD Kernel quirks — use existing schema keys only
-            "kq=p.setdefault(\"Kernel\",{}).setdefault(\"Quirks\",{}); "
-            # AppleCpuPmCfgLock + AppleXcpmCfgLock disable Intel power management
-            # that causes kernel panic on AMD (same effect as DummyPowerManagement)
+            # AMD Kernel quirks — only flip existing keys, never add new ones
+            # (adding unknown keys causes "No schema for X" OC errors).
+            # Shipped OC already has DummyPowerManagement=True, PanicNoKextDump=True,
+            # PowerTimeoutKernelPanic=True, ProvideCurrentCpuInfo=True.
+            "kq=p[\"Kernel\"][\"Quirks\"]; "
             "kq[\"AppleCpuPmCfgLock\"]=True; "
             "kq[\"AppleXcpmCfgLock\"]=True; "
-            "kq[\"PanicNoKextDump\"]=True; "
-            "kq[\"PowerTimeoutKernelPanic\"]=True; "
-            "kq[\"ProvideCurrentCpuInfo\"]=True; "
-            "kq[\"ForceSecureBootScheme\"]=False; "
-            # Disable vector acceleration — Cascadelake-Server with AVX-512 stripped may confuse OC
-            "uq=p.setdefault(\"UEFI\",{}).setdefault(\"Quirks\",{}); "
-            "uq[\"EnableVectorAcceleration\"]=False; "
-            # CryptexFixup needs SecureBootModel != Disabled to hook the cryptex
-            # loading path — keep Default from base config.  But DmgLoading must
-            # be Any because AMD kernel patches break DMG signature validation.
+            # Disable vector acceleration
+            "p[\"UEFI\"][\"Quirks\"][\"EnableVectorAcceleration\"]=False; "
+            # OC rejects SecureBootModel != Disabled with DmgLoading=Any.
+            # Use Disabled + revpatch=sbvmm boot-arg so CryptexFixup still
+            # handles cryptex/root_hash verification via its VMM shim.
+            "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Disabled\"; "
             "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Any\"; "
-            # Append revpatch=sbvmm to boot-args — forces CryptexFixup VMM shim
-            # so it handles the OS.dmg.root_hash cryptex verification on AMD.
+            # Append revpatch=sbvmm to boot-args
             "ba=p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"].get(\"boot-args\",\"\"); "
             "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=ba+\" revpatch=sbvmm\" if \"revpatch=sbvmm\" not in ba else ba; "
         )

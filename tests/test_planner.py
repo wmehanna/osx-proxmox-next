@@ -248,7 +248,8 @@ def test_build_plan_amd_injects_kernel_patches(monkeypatch) -> None:
     assert "Kernel" in build.command
     assert "Patch" in build.command
     assert "cpuid_cores_per_package" in build.command
-    # AMD must relax DmgLoading and add revpatch=sbvmm for CryptexFixup
+    # AMD: SecureBootModel=Disabled + DmgLoading=Any + revpatch=sbvmm
+    assert 'SecureBootModel\"]=\"Disabled\"' in build.command
     assert 'DmgLoading\"]=\"Any\"' in build.command
     assert "revpatch=sbvmm" in build.command
 
