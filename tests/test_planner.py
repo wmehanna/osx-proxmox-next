@@ -24,6 +24,7 @@ def test_build_plan_includes_core_steps() -> None:
     assert "Apply macOS hardware profile" in titles
     assert "Build OpenCore boot disk" in titles
     assert "Import and attach OpenCore disk" in titles
+    assert "Stamp recovery with Apple icon flavour" in titles
     assert "Import and attach macOS recovery" in titles
     assert "Set boot order" in titles
     assert any(step.command.startswith("qm start") for step in steps)
@@ -254,6 +255,25 @@ def test_build_plan_amd_config(monkeypatch) -> None:
     assert "cpuid_cores_per_package" not in build.command
 
 
+def test_build_plan_default_no_verbose(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    cfg = _cfg("sequoia")
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert " -v" not in build.command
+
+
+def test_build_plan_verbose_boot(monkeypatch) -> None:
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    cfg = _cfg("sequoia")
+    cfg.verbose_boot = True
+    steps = build_plan(cfg)
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "-v" in build.command
+
+
 def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
     monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
@@ -262,6 +282,32 @@ def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
     assert "AppleCpuPmCfgLock" not in build.command
     # Intel keeps SecureBootModel=Default (no Disabled override)
     assert 'SecureBootModel\"]=\"Disabled\"' not in build.command
+
+
+def test_build_plan_oc_disk_hides_opencore_entry(monkeypatch) -> None:
+    """OC ESP must have .contentVisibility=Auxiliary to hide from picker."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert ".contentVisibility" in build.command
+    assert "Auxiliary" in build.command
+    assert "HideAuxiliary" in build.command
+
+
+def test_build_plan_stamps_recovery_flavour(monkeypatch) -> None:
+    """Recovery must be stamped with custom name and volume icon."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    steps = build_plan(_cfg("sequoia"))
+    stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
+    assert ".contentDetails" in stamp.command
+    assert "InstallAssistant.icns" in stamp.command
+    assert ".VolumeIcon.icns" in stamp.command
+    assert "hfsplus" in stamp.command
+    # Stamp must come before import
+    titles = [s.title for s in steps]
+    assert titles.index("Stamp recovery with Apple icon flavour") < titles.index("Import and attach macOS recovery")
 
 
 # ── Destroy Plan Tests ─────────────────────────────────────────────

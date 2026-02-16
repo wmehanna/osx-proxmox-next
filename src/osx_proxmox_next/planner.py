@@ -55,6 +55,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     opencore_path = resolve_opencore_path(config.macos)
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
 
+    macos_label = meta["label"]
     cpu_flag = _cpu_args()
     is_amd = detect_cpu_vendor() == "AMD"
 
@@ -104,7 +105,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
             title="Build OpenCore boot disk",
             argv=[
                 "bash", "-c",
-                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos, is_amd, config.cores),
+                _build_oc_disk_script(opencore_path, recovery_raw, oc_disk, config.macos, is_amd, config.cores, config.verbose_boot),
             ],
         ),
         PlanStep(
@@ -117,6 +118,40 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 # Fix GPT header corruption from thin-provisioned LVM importdisk
                 "DEV=$(pvesm path $REF) && "
                 f"dd if={oc_disk} of=$DEV bs=512 count=2048 conv=notrunc 2>/dev/null",
+            ],
+        ),
+        PlanStep(
+            title="Stamp recovery with Apple icon flavour",
+            argv=[
+                "bash", "-c",
+                # Fix HFS+ dirty/lock flags so Linux mounts read-write,
+                # then write OpenCore .contentFlavour + .contentDetails
+                "python3 -c '"
+                "import struct,subprocess; "
+                f"img=\"{recovery_raw}\"; "
+                "out=subprocess.check_output([\"sgdisk\",\"-i\",\"1\",img],text=True); "
+                "start=int([l for l in out.splitlines() if \"First sector\" in l][0].split(\":\")[1].split(\"(\")[0].strip()); "
+                "off=start*512+1024+4; "
+                "f=open(img,\"r+b\"); f.seek(off); "
+                "a=struct.unpack(\">I\",f.read(4))[0]; "
+                "a=(a|0x100)&~0x800; "
+                "f.seek(off); f.write(struct.pack(\">I\",a)); "
+                "f.close(); print(\"HFS+ flags fixed\")' && "
+                f"RLOOP=$(losetup --find --show {recovery_raw}) && "
+                "partprobe $RLOOP && sleep 1 && "
+                "mkdir -p /tmp/oc-recovery && "
+                "mount -t hfsplus -o rw ${RLOOP}p1 /tmp/oc-recovery && "
+                # Set custom name via .contentDetails in blessed directory
+                "rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null; "
+                f"printf '{macos_label}' > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails && "
+                # Copy macOS installer icon as .VolumeIcon.icns for boot picker
+                "ICON=$(find /tmp/oc-recovery -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1) && "
+                "if [ -n \"$ICON\" ]; then "
+                "rm -f /tmp/oc-recovery/.VolumeIcon.icns; "
+                "cp \"$ICON\" /tmp/oc-recovery/.VolumeIcon.icns && "
+                "echo \"Volume icon set from $ICON\"; "
+                "else echo \"No InstallAssistant.icns found, using default icon\"; fi && "
+                "umount /tmp/oc-recovery && losetup -d $RLOOP",
             ],
         ),
         PlanStep(
@@ -175,7 +210,7 @@ def render_script(config: VmConfig, steps: list[PlanStep]) -> str:
 
 def _build_oc_disk_script(
     opencore_path: Path, recovery_path: Path, dest: Path, macos: str,
-    is_amd: bool = False, cores: int = 4,
+    is_amd: bool = False, cores: int = 4, verbose_boot: bool = False,
 ) -> str:
     """Build a bash script that creates a GPT+ESP OpenCore disk with patched config."""
     meta = SUPPORTED_MACOS.get(macos, {})
@@ -219,10 +254,13 @@ def _build_oc_disk_script(
         "p[\"Misc\"][\"Security\"][\"ScanPolicy\"]=0; "
         "p[\"Misc\"][\"Security\"][\"DmgLoading\"]=\"Signed\"; "
         "p[\"Misc\"][\"Security\"][\"SecureBootModel\"]=\"Default\"; "
-        "p[\"Misc\"][\"Boot\"][\"Timeout\"]=0; "
+        "p[\"Misc\"][\"Boot\"][\"Timeout\"]=15; "
         "p[\"Misc\"][\"Boot\"][\"PickerAttributes\"]=17; "
+        "p[\"Misc\"][\"Boot\"][\"HideAuxiliary\"]=True; "
+        "p[\"Misc\"][\"Boot\"][\"PickerMode\"]=\"External\"; "
+        "p[\"Misc\"][\"Boot\"][\"PickerVariant\"]=\"Acidanthera\\\\Syrah\"; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"csr-active-config\"]=b\"\\x67\\x0f\\x00\\x00\"; "
-        "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100 -v\"; "
+        f"p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"boot-args\"]=\"keepsyms=1 debug=0x100{' -v' if verbose_boot else ''}\"; "
         "p[\"NVRAM\"][\"Add\"][\"7C436110-AB2A-4BBB-A880-FE41995C9F82\"][\"prev-lang:kbd\"]=\"en-US:0\".encode(); "
         # Ensure NVRAM Delete purges stale values so our Add entries take effect
         "nv_del=p.setdefault(\"NVRAM\",{}).setdefault(\"Delete\",{}); "
@@ -233,6 +271,8 @@ def _build_oc_disk_script(
         + amd_patch_block +
         "f=open(\"/tmp/oc-dest/EFI/OC/config.plist\",\"wb\"); plistlib.dump(p,f); f.close(); "
         "print(\"config.plist patched\")' && "
+        # Hide OC partition from boot picker (shown only when user presses Space)
+        "echo Auxiliary > /tmp/oc-dest/.contentVisibility && "
         # Cleanup mounts
         "umount /tmp/oc-src && losetup -d $SRC_LOOP && "
         "umount /tmp/oc-dest && losetup -d $DEST_LOOP"

@@ -86,3 +86,11 @@ def test_detect_cpu_vendor_intel(monkeypatch, tmp_path):
 def test_detect_cpu_vendor_missing(monkeypatch):
     monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: Path("/nonexistent/cpuinfo"))
     assert detect_cpu_vendor() == "Intel"
+
+
+def test_detect_cpu_vendor_no_vendor_line(monkeypatch, tmp_path):
+    """cpuinfo exists but has no vendor_id line → fallback to Intel."""
+    fake_cpuinfo = tmp_path / "cpuinfo"
+    fake_cpuinfo.write_text("model name\t: Some CPU\nflags\t: sse sse2\n")
+    monkeypatch.setattr("osx_proxmox_next.defaults.Path", lambda p: fake_cpuinfo if p == "/proc/cpuinfo" else Path(p))
+    assert detect_cpu_vendor() == "Intel"
