@@ -69,6 +69,7 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
                 "--machine", "q35",
                 "--bios", "ovmf",
                 "--cores", str(config.cores),
+                "--sockets", "1",
                 "--memory", str(config.memory_mb),
                 "--cpu", "host",
                 "--net0", f"virtio,bridge={config.bridge}",
