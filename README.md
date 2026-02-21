@@ -442,6 +442,10 @@ This project is free and open source. Sponsors keep it alive and shape what gets
   <a href="https://ko-fi.com/lucidfabrics">
     <img src="https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support on Ko-fi">
   </a>
+  &nbsp;
+  <a href="https://discord.gg/2M5RJSGd">
+    <img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white" alt="Join our Discord">
+  </a>
 </p>
 
 **Sponsors:**
