@@ -868,7 +868,7 @@ SMBIOS_MFR_B64=$(echo -n "Apple Inc." | base64)
 SMBIOS_PRODUCT_B64=$(echo -n "$SMBIOS_MODEL" | base64)
 SMBIOS_FAMILY_B64=$(echo -n "Mac" | base64)
 qm set "$VMID" \
-  --smbios1 "uuid=${SMBIOS_UUID},serial=${SMBIOS_SERIAL_B64},manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
+  --smbios1 "uuid=${SMBIOS_UUID},base64=1,serial=${SMBIOS_SERIAL_B64},manufacturer=${SMBIOS_MFR_B64},product=${SMBIOS_PRODUCT_B64},family=${SMBIOS_FAMILY_B64}" \
   >/dev/null
 msg_ok "Set SMBIOS identity (serial: $SMBIOS_SERIAL)"
 

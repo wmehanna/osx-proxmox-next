@@ -65,6 +65,7 @@ def test_build_plan_includes_smbios_step() -> None:
     assert "Set SMBIOS identity" in titles
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
     assert "--smbios1" in smbios_step.command
+    assert "base64=1," in smbios_step.command
     assert f"manufacturer={base64.b64encode(b'Apple Inc.').decode()}" in smbios_step.command
     assert f"family={base64.b64encode(b'Mac').decode()}" in smbios_step.command
 
@@ -179,7 +180,7 @@ def test_build_plan_recovery_uses_importdisk(monkeypatch) -> None:
 
 
 def test_smbios_values_are_base64_encoded():
-    """Smbios1 values must be Base64-encoded for Proxmox."""
+    """Smbios1 values must be Base64-encoded for Proxmox with base64=1 flag."""
     import base64
     cfg = _cfg("tahoe")
     cfg.installer_path = "/tmp/tahoe.iso"
@@ -189,6 +190,7 @@ def test_smbios_values_are_base64_encoded():
     steps = build_plan(cfg)
     smbios_step = next(step for step in steps if step.title == "Set SMBIOS identity")
     encoded = base64.b64encode(b"MacPro7,1").decode()
+    assert "base64=1," in smbios_step.command
     assert f"product={encoded}," in smbios_step.command
     assert "MacPro7,1" not in smbios_step.command
 

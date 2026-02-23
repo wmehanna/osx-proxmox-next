@@ -316,6 +316,7 @@ def _smbios_steps(config: VmConfig, vmid: str) -> list[PlanStep]:
         model = model_for_macos(config.macos)
     smbios_value = (
         f"uuid={smbios_uuid},"
+        f"base64=1,"
         f"serial={_encode_smbios_value(serial)},"
         f"manufacturer={_encode_smbios_value('Apple Inc.')},"
         f"product={_encode_smbios_value(model)},"
