@@ -6,7 +6,7 @@ from pathlib import Path
 from shlex import join
 
 from .assets import resolve_opencore_path, resolve_recovery_or_installer_path
-from .defaults import detect_cpu_vendor
+from .defaults import CpuInfo, detect_cpu_info
 from .domain import SUPPORTED_MACOS, VmConfig
 from .infrastructure import ProxmoxAdapter
 from .smbios import generate_smbios, model_for_macos
@@ -23,17 +23,29 @@ class PlanStep:
         return join(self.argv)
 
 
-def _cpu_args() -> str:
-    """Return QEMU -cpu flag tailored to host CPU vendor.
+def _cpu_args(cpu: CpuInfo, override: str = "") -> str:
+    """Return QEMU -cpu flag tailored to host CPU.
 
-    AMD uses Cascadelake-Server with AVX-512/TSX/PCID disabled — this presents
-    a convincing Intel server CPUID to macOS while avoiding instructions AMD
-    CPUs lack.  Combined with AMD_Vanilla kernel patches this covers all
-    all supported macOS versions reliably.
+    If *override* is provided (e.g. ``Skylake-Server-IBRS``), it is used
+    directly as the -cpu model with standard KVM flags.
+
+    AMD always uses Cascadelake-Server emulation (no native macOS support).
+    Intel hybrid CPUs (12th gen+) also need Cascadelake-Server because macOS
+    hardware validation fails on P+E core topology with correct SMBIOS.
+
+    Non-hybrid Intel uses ``-cpu host`` for native passthrough.
 
     Ref: luchina-gabriel/OSX-PROXMOX (battle-tested on ~5k installs).
     """
-    if detect_cpu_vendor() == "AMD":
+    if override:
+        return (
+            f"-cpu {override},"
+            "kvm=on,"
+            "vendor=GenuineIntel,"
+            "+invtsc,"
+            "vmware-cpuid-freq=on"
+        )
+    if cpu.needs_emulated_cpu:
         return (
             "-cpu Cascadelake-Server,"
             "vendor=GenuineIntel,"
@@ -56,8 +68,11 @@ def build_plan(config: VmConfig) -> list[PlanStep]:
     oc_disk = opencore_path.parent / f"opencore-{config.macos}-vm{vmid}.img"
 
     macos_label = meta["label"]
-    cpu_flag = _cpu_args()
-    is_amd = detect_cpu_vendor() == "AMD"
+    cpu = detect_cpu_info()
+    cpu_flag = _cpu_args(cpu, override=config.cpu_model)
+    # AMD needs kernel patches (AppleCpuPmCfgLock / AppleXcpmCfgLock).
+    # Hybrid Intel does NOT — it only needs Cascadelake-Server emulation.
+    is_amd = cpu.vendor == "AMD"
 
     steps = [
         PlanStep(

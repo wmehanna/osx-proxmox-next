@@ -1,6 +1,13 @@
+from osx_proxmox_next.defaults import CpuInfo
 from osx_proxmox_next.domain import VmConfig
 from osx_proxmox_next.planner import build_plan, render_script, _cpu_args, VmInfo, fetch_vm_info, build_destroy_plan
 from osx_proxmox_next.infrastructure import CommandResult
+
+
+def _cpu(vendor="Intel", model_name="", family=6, model=85, needs_emulated=False):
+    """Helper to build CpuInfo for tests."""
+    return CpuInfo(vendor=vendor, model_name=model_name, family=family,
+                   model=model, needs_emulated_cpu=needs_emulated)
 
 
 def _cfg(macos: str) -> VmConfig:
@@ -203,23 +210,23 @@ def test_render_script_simple() -> None:
     assert "Build OpenCore boot disk" in script
 
 
-# ── CPU Vendor Detection Tests ─────────────────────────────────────
+# ── CPU Detection Tests ───────────────────────────────────────────────
 
 
-def test_cpu_args_intel(monkeypatch) -> None:
-    import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
-    args = _cpu_args()
+def test_cpu_args_intel() -> None:
+    """Legacy Intel → -cpu host passthrough."""
+    cpu = _cpu(vendor="Intel", needs_emulated=False)
+    args = _cpu_args(cpu)
     assert "-cpu host," in args
     assert "vendor=GenuineIntel" in args
     assert "+kvm_pv_unhalt" in args
     assert "vmware-cpuid-freq=on" in args
 
 
-def test_cpu_args_amd(monkeypatch) -> None:
-    import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
-    args = _cpu_args()
+def test_cpu_args_amd() -> None:
+    """AMD → Cascadelake-Server emulation."""
+    cpu = _cpu(vendor="AMD", needs_emulated=True)
+    args = _cpu_args(cpu)
     assert "Cascadelake-Server" in args
     assert "vendor=GenuineIntel" in args
     assert "vmware-cpuid-freq=on" in args
@@ -228,9 +235,30 @@ def test_cpu_args_amd(monkeypatch) -> None:
     assert "host" not in args
 
 
+def test_cpu_args_intel_hybrid() -> None:
+    """Hybrid Intel (12th gen+) → Cascadelake-Server, same as AMD."""
+    cpu = _cpu(vendor="Intel", model=151, needs_emulated=True)
+    args = _cpu_args(cpu)
+    assert "Cascadelake-Server" in args
+    assert "-avx512f" in args
+    assert "-pcid" in args
+    assert "host" not in args
+
+
+def test_cpu_args_override() -> None:
+    """CLI --cpu-model override takes precedence."""
+    cpu = _cpu(vendor="Intel", needs_emulated=False)
+    args = _cpu_args(cpu, override="Skylake-Server-IBRS")
+    assert "Skylake-Server-IBRS" in args
+    assert "kvm=on" in args
+    assert "vendor=GenuineIntel" in args
+    assert "Cascadelake" not in args
+    assert "host" not in args
+
+
 def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", needs_emulated=True))
     steps = build_plan(_cfg("sequoia"))
     profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
     assert "Cascadelake-Server" in profile.command
@@ -239,16 +267,29 @@ def test_build_plan_amd_uses_cascadelake(monkeypatch) -> None:
 
 def test_build_plan_intel_uses_host(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
     assert "-cpu host," in profile.command
     assert "vendor=GenuineIntel" in profile.command
 
 
+def test_build_plan_intel_hybrid_uses_cascadelake(monkeypatch) -> None:
+    """Hybrid Intel gets Cascadelake-Server but NOT AMD kernel patches."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", model=151, needs_emulated=True))
+    steps = build_plan(_cfg("sequoia"))
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "Cascadelake-Server" in profile.command
+    # Must NOT have AMD kernel patches
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    assert "AppleCpuPmCfgLock" not in build.command
+    assert "AppleXcpmCfgLock" not in build.command
+
+
 def test_build_plan_amd_config(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "AMD")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="AMD", needs_emulated=True))
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     # Power management locks flipped for AMD
@@ -262,7 +303,7 @@ def test_build_plan_amd_config(monkeypatch) -> None:
 
 def test_build_plan_default_no_verbose(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     cfg = _cfg("sequoia")
     steps = build_plan(cfg)
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
@@ -271,7 +312,7 @@ def test_build_plan_default_no_verbose(monkeypatch) -> None:
 
 def test_build_plan_verbose_boot(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     cfg = _cfg("sequoia")
     cfg.verbose_boot = True
     steps = build_plan(cfg)
@@ -281,7 +322,7 @@ def test_build_plan_verbose_boot(monkeypatch) -> None:
 
 def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     assert "AppleCpuPmCfgLock" not in build.command
@@ -290,7 +331,7 @@ def test_build_plan_intel_no_amd_config(monkeypatch) -> None:
 def test_build_plan_oc_disk_hides_opencore_entry(monkeypatch) -> None:
     """OC ESP must have .contentVisibility=Auxiliary to hide from picker."""
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     build = next(step for step in steps if step.title == "Build OpenCore boot disk")
     assert ".contentVisibility" in build.command
@@ -301,7 +342,7 @@ def test_build_plan_oc_disk_hides_opencore_entry(monkeypatch) -> None:
 def test_build_plan_stamps_recovery_flavour(monkeypatch) -> None:
     """Recovery must be stamped with custom name and volume icon."""
     import osx_proxmox_next.planner as planner
-    monkeypatch.setattr(planner, "detect_cpu_vendor", lambda: "Intel")
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
     steps = build_plan(_cfg("sequoia"))
     stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
     assert ".contentDetails" in stamp.command
@@ -311,6 +352,18 @@ def test_build_plan_stamps_recovery_flavour(monkeypatch) -> None:
     # Stamp must come before import
     titles = [s.title for s in steps]
     assert titles.index("Stamp recovery with Apple icon flavour") < titles.index("Import and attach macOS recovery")
+
+
+def test_build_plan_cpu_model_override(monkeypatch) -> None:
+    """--cpu-model override is used in hardware profile."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", model=151, needs_emulated=True))
+    cfg = _cfg("sequoia")
+    cfg.cpu_model = "Skylake-Server-IBRS"
+    steps = build_plan(cfg)
+    profile = next(step for step in steps if step.title == "Apply macOS hardware profile")
+    assert "Skylake-Server-IBRS" in profile.command
+    assert "Cascadelake" not in profile.command
 
 
 # ── Destroy Plan Tests ─────────────────────────────────────────────

@@ -33,6 +33,7 @@ class VmConfig:
     static_mac: str = ""
     verbose_boot: bool = False
     iso_dir: str = ""
+    cpu_model: str = ""
 
 
 def validate_config(config: VmConfig) -> list[str]:

@@ -241,7 +241,7 @@ function check_dependencies() {
   fi
 }
 
-# ── Detect CPU vendor ──
+# ── Detect CPU vendor and model ──
 function detect_cpu_vendor() {
   if grep -q "AuthenticAMD" /proc/cpuinfo 2>/dev/null; then
     echo "AMD"
@@ -250,7 +250,35 @@ function detect_cpu_vendor() {
   fi
 }
 
+function detect_cpu_needs_emulation() {
+  local vendor family model
+  vendor=$(detect_cpu_vendor)
+  if [ "$vendor" = "AMD" ]; then
+    echo "yes"
+    return
+  fi
+  # Parse cpu family and model from /proc/cpuinfo
+  family=$(awk -F: '/^cpu family/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
+  model=$(awk -F: '/^model\t/{print int($2); exit}' /proc/cpuinfo 2>/dev/null)
+  family=${family:-0}
+  model=${model:-0}
+  # Intel Family 6 + known hybrid models (12th gen+) need emulation
+  # Model numbers: 151=Alder Lake-S, 154=Alder Lake-P, 170=Meteor Lake,
+  #   183=Raptor Lake-S, 186=Raptor Lake-P, >=190 future hybrid
+  if [ "$family" -eq 6 ]; then
+    case "$model" in
+      151|154|170|183|186) echo "yes"; return ;;
+    esac
+    if [ "$model" -ge 190 ]; then
+      echo "yes"
+      return
+    fi
+  fi
+  echo "no"
+}
+
 CPU_VENDOR=$(detect_cpu_vendor)
+CPU_NEEDS_EMULATION=$(detect_cpu_needs_emulation)
 
 # ── Per-version default disk sizes (matches Python defaults.py) ──
 function default_disk_gb() {
@@ -847,8 +875,8 @@ qm create "$VMID" \
 msg_ok "Created VM shell"
 
 # ── Apply macOS hardware profile ──
-msg_info "Applying macOS hardware profile (CPU: $CPU_VENDOR)"
-if [ "$CPU_VENDOR" = "AMD" ]; then
+msg_info "Applying macOS hardware profile (CPU: $CPU_VENDOR, emulation: $CPU_NEEDS_EMULATION)"
+if [ "$CPU_NEEDS_EMULATION" = "yes" ]; then
   CPU_FLAG="-cpu Cascadelake-Server,vendor=GenuineIntel,+invtsc,-pcid,-hle,-rtm,-avx512f,-avx512dq,-avx512cd,-avx512bw,-avx512vl,-avx512vnni,kvm=on,vmware-cpuid-freq=on"
 else
   CPU_FLAG="-cpu host,kvm=on,vendor=GenuineIntel,+kvm_pv_unhalt,+kvm_pv_eoi,+hypervisor,+invtsc,vmware-cpuid-freq=on"
