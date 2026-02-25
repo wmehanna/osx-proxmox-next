@@ -199,7 +199,7 @@ osx-next-cli apply --execute \
   --vmid 910 --name macos-sequoia --macos sequoia \
   --cores 8 --memory 16384 --disk 128 \
   --bridge vmbr0 --storage local-lvm \
-  --smbios-serial C02X1234ABCD --smbios-uuid "$(uuidgen)" \
+  --smbios-serial C02G3050P7QM --smbios-uuid "$(uuidgen)" \
   --smbios-model MacPro7,1
 
 # Enable Apple Services (iMessage, FaceTime, iCloud)
@@ -376,7 +376,7 @@ macOS validates Apple ID through two identity sources:
 Both must carry **identical values**. The ROM field must be derived from the NIC MAC address — macOS cross-checks ROM against the hardware NIC during Apple ID validation.
 
 When `--apple-services` is enabled, this tool automatically:
-1. Generates a unique SMBIOS identity (serial, UUID, MLB, ROM, model)
+1. Generates Apple-format SMBIOS identity (serial, UUID, MLB, ROM, model) — GenSMBIOS-compatible base-34 serials with valid manufacturing codes and checksummed MLB, no external binary needed
 2. Generates a stable static MAC address for the NIC
 3. Derives ROM from the MAC address (first 6 bytes, no colons)
 4. Applies SMBIOS via Proxmox's `--smbios1` flag

@@ -336,15 +336,76 @@ function detect_memory_mb() {
 function generate_smbios() {
   local macos_ver="$1"
   local existing_uuid="$2"
-  SMBIOS_SERIAL=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 12)
-  SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
+  SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-MacPro7,1}"
+
+  if [ "$APPLE_SERVICES" = "true" ]; then
+    # Apple-format serial+MLB via inline Python (same algorithm as smbios.py).
+    # Constants are duplicated here — keep in sync with smbios.py APPLE_PLATFORM_DATA.
+    # Model passed via env var to avoid shell injection into Python source.
+    local smbios_out
+    smbios_out=$(SMBIOS_MODEL_ENV="$SMBIOS_MODEL" python3 -c "
+import os, secrets
+
+BASE34 = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+YEAR_CHARS = 'CDFGHJKLMN'
+
+PLATFORMS = {
+    'MacPro7,1': {
+        'model_codes': ['P7QM','PLXV','PLXW','PLXX','PLXY','P7QJ','P7QK','P7QL','P7QN','P7QP','NYGV','K7GF','K7GD','N5RN'],
+        'board_codes': ['K3F7'],
+        'country_codes': ['C02','C07','CK2'],
+        'year_range': (2019, 2023),
+    },
+}
+
+BLOCK1 = ['200','600','403','404','405','303','108','207','609','501','306','102','701','301']
+BLOCK2 = ['Q' + c for c in BASE34]
+
+model = os.environ['SMBIOS_MODEL_ENV']
+p = PLATFORMS[model]
+yr_lo, yr_hi = p['year_range']
+country = secrets.choice(p['country_codes'])
+year = yr_lo + secrets.randbelow(yr_hi - yr_lo + 1)
+week = 1 + secrets.randbelow(52)
+line = secrets.randbelow(3400)
+model_code = secrets.choice(p['model_codes'])
+
+# Encode serial
+dec = (year - 2010) % 10
+if week <= 26:
+    yc = YEAR_CHARS[dec]; wi = week
+else:
+    yc = YEAR_CHARS[(dec + 1) % 10]; wi = week - 26
+d1 = line // (34 * 34); d2 = (line // 34) % 34; d3 = line % 34
+serial = country + yc + BASE34[wi] + BASE34[d1] + BASE34[d2] + BASE34[d3] + model_code
+
+# Build MLB
+board = secrets.choice(p['board_codes'])
+b1 = secrets.choice(BLOCK1)
+b2 = secrets.choice(BLOCK2)
+prefix = country + str(year % 10) + f'{week:02d}' + b1 + b2 + board
+ps = sum((3 if ((i & 1) == (17 & 1)) else 1) * BASE34.index(c) for i, c in enumerate(prefix))
+j16 = (-ps) % 34
+mlb = prefix + '0' + BASE34[j16]
+
+print(serial, mlb)
+") || { msg_error "Failed to generate Apple-format SMBIOS"; exit 1; }
+    read -r SMBIOS_SERIAL SMBIOS_MLB <<< "$smbios_out"
+    if [ -z "$SMBIOS_SERIAL" ] || [ -z "$SMBIOS_MLB" ]; then
+      msg_error "Apple-format SMBIOS generation returned empty values"
+      exit 1
+    fi
+  else
+    SMBIOS_SERIAL=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 12)
+    SMBIOS_MLB=$(cat /dev/urandom | tr -dc 'A-Z0-9' | head -c 17)
+  fi
+
   SMBIOS_ROM=$(openssl rand -hex 6 | tr '[:lower:]' '[:upper:]')
   if [ -n "$existing_uuid" ]; then
     SMBIOS_UUID="$existing_uuid"
   else
     SMBIOS_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:lower:]' '[:upper:]')
   fi
-  SMBIOS_MODEL="${SMBIOS_MODELS[$macos_ver]:-MacPro7,1}"
 }
 
 # ── Download macOS recovery via Apple's osrecovery API ──
