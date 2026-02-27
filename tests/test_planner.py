@@ -560,6 +560,62 @@ def test_build_plan_apple_services_uses_vmxnet3(monkeypatch) -> None:
     assert "firewall=0" in net_step.command
 
 
+def test_build_plan_oc_validates_losetup(monkeypatch) -> None:
+    """OC build script must validate losetup output and retry partprobe."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    assert '[ -b "$SRC_LOOP" ]' in cmd
+    assert '[ -b "$DEST_LOOP" ]' in cmd
+    assert "for _i in" in cmd
+    assert "mountpoint -q" in cmd
+
+
+def test_build_plan_oc_cleans_stale_dest_loops(monkeypatch) -> None:
+    """OC build must clean stale loops for both source ISO and destination disk."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    # Must have at least 2 losetup -j calls (source + dest stale cleanup)
+    assert cmd.count("losetup -j") >= 2
+
+
+def test_build_plan_recovery_validates_losetup(monkeypatch) -> None:
+    """Recovery stamp step must validate losetup, check partitions, and verify mount."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    stamp = next(step for step in steps if step.title == "Stamp recovery with Apple icon flavour")
+    cmd = stamp.command
+    assert '[ -b "$RLOOP" ]' in cmd
+    assert "mountpoint -q" in cmd
+    assert "losetup -j" in cmd
+
+
+def test_build_plan_oc_error_messages_actionable(monkeypatch) -> None:
+    """Error paths must include diagnostic hints (modprobe loop or losetup -a)."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    assert "modprobe loop" in cmd or "losetup -a" in cmd
+
+
+def test_build_plan_blkid_fallback_warns(monkeypatch) -> None:
+    """When blkid finds no vfat partition, a WARN must be emitted before raw mount."""
+    import osx_proxmox_next.planner as planner
+    monkeypatch.setattr(planner, "detect_cpu_info", lambda: _cpu(vendor="Intel", needs_emulated=False))
+    steps = build_plan(_cfg("sequoia"))
+    build = next(step for step in steps if step.title == "Build OpenCore boot disk")
+    cmd = build.command
+    assert "WARN" in cmd
+
+
 def test_fetch_vm_info_no_name_in_config() -> None:
     class FakeAdapter:
         def run(self, argv):

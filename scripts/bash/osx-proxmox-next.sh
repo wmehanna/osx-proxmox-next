@@ -122,10 +122,15 @@ function cleanup_vmid() {
 }
 
 function cleanup() {
-  [ -n "${BUILD_SRC_MNT:-}" ] && umount "$BUILD_SRC_MNT" 2>/dev/null || true
-  [ -n "${BUILD_DEST_MNT:-}" ] && umount "$BUILD_DEST_MNT" 2>/dev/null || true
-  [ -n "${BUILD_SRC_LOOP:-}" ] && losetup -d "$BUILD_SRC_LOOP" 2>/dev/null || true
-  [ -n "${BUILD_LOOP:-}" ] && losetup -d "$BUILD_LOOP" 2>/dev/null || true
+  local mnt loop
+  # Unmount all tracked mount points (lazy fallback for busy mounts)
+  for mnt in "${BUILD_SRC_MNT:-}" "${BUILD_DEST_MNT:-}" "${RECOVERY_MNT:-}"; do
+    [ -n "$mnt" ] && { umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true; }
+  done
+  # Detach all tracked loop devices
+  for loop in "${BUILD_SRC_LOOP:-}" "${BUILD_LOOP:-}" "${RLOOP:-}"; do
+    [ -n "$loop" ] && { losetup -d "$loop" 2>/dev/null || true; }
+  done
   popd >/dev/null 2>/dev/null || true
   rm -rf "${TEMP_DIR:-}"
 }
@@ -143,6 +148,72 @@ function msg_ok() {
 function msg_error() {
   local msg="$1"
   echo -e "${BFR}${CROSS}${RD}${msg}${CL}"
+}
+
+# ── Loop/mount helper functions ──
+# Cleanup stale loop devices attached to FILE from a previous failed run.
+function cleanup_stale_loops() {
+  local file="$1"
+  local lo
+  for lo in $(losetup -j "$file" -O NAME --noheadings 2>/dev/null); do
+    umount -l "$lo"* 2>/dev/null || true
+    losetup -d "$lo" 2>/dev/null || true
+  done
+}
+
+# Set up a loop device with validation and retry.
+# Usage: setup_loop VARNAME FILE LABEL
+# Sets the variable named VARNAME to the loop device path.
+function setup_loop() {
+  local varname="$1"
+  local file="$2"
+  local label="$3"
+  local dev stderr_out
+
+  if [ ! -f "$file" ]; then
+    msg_error "Cannot set up ${label}: file not found: ${file}"
+    exit 1
+  fi
+
+  stderr_out=$(mktemp)
+  dev=$(losetup -fP --show "$file" 2>"$stderr_out") || true
+  local losetup_err
+  losetup_err=$(cat "$stderr_out" 2>/dev/null)
+  rm -f "$stderr_out"
+
+  if [ -z "$dev" ] || [ ! -b "$dev" ]; then
+    msg_error "ERROR: losetup failed for ${label}. Output: '${dev}${losetup_err}'"
+    echo -e "  Hints: modprobe loop; losetup -a; ls /dev/loop*"
+    exit 1
+  fi
+
+  # Retry partprobe up to 5 times (slow storage / device-mapper lag)
+  local _i
+  for _i in 1 2 3 4 5; do
+    partprobe "$dev" 2>/dev/null || true
+    if ls "${dev}p"* &>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  eval "$varname=\"$dev\""
+}
+
+# Mount with validation.
+# Usage: safe_mount SRC DEST [OPTS...]
+function safe_mount() {
+  local src="$1"
+  local dest="$2"
+  shift 2
+
+  mount "$@" "$src" "$dest" 2>/dev/null || mount "$@" "$src" "$dest" || true
+
+  if ! mountpoint -q "$dest"; then
+    msg_error "ERROR: ${dest} is not mounted after mount command"
+    echo -e "  Hints: file ${src}; blkid ${src}; dmesg | tail -5"
+    exit 1
+  fi
 }
 
 function check_root() {
@@ -518,9 +589,11 @@ function build_opencore_disk() {
 
   msg_info "Building OpenCore boot disk (GPT+ESP)"
 
-  # Clean up stale mounts from previous failed runs
+  # Clean up stale mounts/loops from previous failed runs
   umount /tmp/oc-src 2>/dev/null || true
   umount /tmp/oc-dest 2>/dev/null || true
+  cleanup_stale_loops "$source_iso"
+  cleanup_stale_loops "$dest_disk"
 
   # Create 1GB blank disk
   dd if=/dev/zero of="$dest_disk" bs=1M count=1024 status=none
@@ -531,10 +604,15 @@ function build_opencore_disk() {
 
   # Set up loop device for destination (tracked globally for cleanup)
   local dest_loop
-  dest_loop=$(losetup -fP --show "$dest_disk")
+  setup_loop dest_loop "$dest_disk" "OpenCore destination disk"
   BUILD_LOOP="$dest_loop"
-  partprobe "$dest_loop" 2>/dev/null || true
-  sleep 1
+
+  # Verify partition exists before formatting
+  if [ ! -b "${dest_loop}p1" ]; then
+    msg_error "ERROR: ${dest_loop}p1 not found after partprobe"
+    echo -e "  Hint: Try running the script again (slow storage)"
+    exit 1
+  fi
 
   # Format ESP partition
   mkfs.fat -F 32 -n OPENCORE "${dest_loop}p1" &>/dev/null
@@ -542,25 +620,25 @@ function build_opencore_disk() {
   # Mount destination ESP
   local dest_mnt
   dest_mnt=$(mktemp -d)
-  mount "${dest_loop}p1" "$dest_mnt"
+  safe_mount "${dest_loop}p1" "$dest_mnt"
   BUILD_DEST_MNT="$dest_mnt"
 
   # Mount source ISO (use blkid to find FAT32 partition for any layout)
   local src_mnt src_loop src_part
   src_mnt=$(mktemp -d)
-  src_loop=$(losetup -fP --show "$source_iso")
-  partprobe "$src_loop" 2>/dev/null || true
-  sleep 1
+  setup_loop src_loop "$source_iso" "OpenCore source ISO"
+  BUILD_SRC_LOOP="$src_loop"
+
   src_part=$(blkid -o device "$src_loop" "${src_loop}"p* 2>/dev/null \
     | xargs -I{} sh -c 'blkid -s TYPE -o value {} 2>/dev/null | grep -q vfat && echo {}' \
     | head -1)
   if [ -n "$src_part" ]; then
-    mount -o ro "$src_part" "$src_mnt"
+    safe_mount "$src_part" "$src_mnt" -o ro
   else
-    mount -o ro "$src_loop" "$src_mnt"
+    echo -e "  ${YW}WARN: No vfat partition found on source ISO via blkid, trying raw mount${CL}"
+    safe_mount "$src_loop" "$src_mnt" -o ro
   fi
   BUILD_SRC_MNT="$src_mnt"
-  BUILD_SRC_LOOP="$src_loop"
 
   # Copy OpenCore files
   cp -a "$src_mnt"/* "$dest_mnt"/ 2>/dev/null || cp -a "$src_mnt"/. "$dest_mnt"/ 2>/dev/null || true
@@ -1075,23 +1153,30 @@ a = (a | 0x100) & ~0x800
 f.seek(off); f.write(struct.pack('>I', a))
 f.close(); print('HFS+ flags fixed')
 "
-RLOOP=$(losetup --find --show "$RECOVERY_RAW")
-partprobe "$RLOOP" && sleep 1
-mkdir -p /tmp/oc-recovery
-mount -t hfsplus -o rw "${RLOOP}p1" /tmp/oc-recovery
-# Write .contentDetails in CoreServices (matches Python planner)
-mkdir -p /tmp/oc-recovery/System/Library/CoreServices
-rm -f /tmp/oc-recovery/System/Library/CoreServices/.contentDetails 2>/dev/null
-printf '%s' "$MACOS_LABEL" > /tmp/oc-recovery/System/Library/CoreServices/.contentDetails
-# Copy InstallAssistant.icns → .VolumeIcon.icns (matches Python planner)
-ICON=$(find /tmp/oc-recovery -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1)
-if [ -n "$ICON" ]; then
-  rm -f /tmp/oc-recovery/.VolumeIcon.icns
-  cp "$ICON" /tmp/oc-recovery/.VolumeIcon.icns
+cleanup_stale_loops "$RECOVERY_RAW"
+setup_loop RLOOP "$RECOVERY_RAW" "recovery image"
+RECOVERY_MNT="/tmp/oc-recovery"
+mkdir -p "$RECOVERY_MNT"
+if [ ! -b "${RLOOP}p1" ]; then
+  msg_error "ERROR: ${RLOOP}p1 not found after partprobe"
+  echo -e "  Hint: Try running the script again (slow storage)"
+  exit 1
 fi
-umount /tmp/oc-recovery
-losetup -d "$RLOOP"
-rm -rf /tmp/oc-recovery
+safe_mount "${RLOOP}p1" "$RECOVERY_MNT" -t hfsplus -o rw
+# Write .contentDetails in CoreServices (matches Python planner)
+mkdir -p "$RECOVERY_MNT/System/Library/CoreServices"
+rm -f "$RECOVERY_MNT/System/Library/CoreServices/.contentDetails" 2>/dev/null
+printf '%s' "$MACOS_LABEL" > "$RECOVERY_MNT/System/Library/CoreServices/.contentDetails"
+# Copy InstallAssistant.icns → .VolumeIcon.icns (matches Python planner)
+ICON=$(find "$RECOVERY_MNT" -path '*/Install macOS*/Contents/Resources/InstallAssistant.icns' 2>/dev/null | head -1)
+if [ -n "$ICON" ]; then
+  rm -f "$RECOVERY_MNT/.VolumeIcon.icns"
+  cp "$ICON" "$RECOVERY_MNT/.VolumeIcon.icns"
+fi
+umount "$RECOVERY_MNT" 2>/dev/null || umount -l "$RECOVERY_MNT" 2>/dev/null || true
+losetup -d "$RLOOP" 2>/dev/null || true
+rm -rf "$RECOVERY_MNT"
+RLOOP="" RECOVERY_MNT=""
 msg_ok "Recovery stamped with Apple icon"
 
 # ── Import and attach recovery disk → ide2 ──

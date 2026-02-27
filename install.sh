@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_URL="${OSX_NEXT_REPO_URL:-https://github.com/lucid-fabrics/osx-proxmox-next.git}"
 REPO_DIR="${OSX_NEXT_REPO_DIR:-/root/osx-proxmox-next}"
-REPO_BRANCH="${OSX_NEXT_BRANCH:-main}"
+REPO_BRANCH="${OSX_NEXT_BRANCH:-fix/smbios-base64-flag}"
 VENV_DIR="${OSX_NEXT_VENV_DIR:-$REPO_DIR/.venv}"
 LOG_FILE="${OSX_NEXT_LOG_FILE:-/root/osx-proxmox-next-install.log}"
 
@@ -61,8 +61,17 @@ launch() {
   exec osx-next
 }
 
+nuke_stale() {
+  # Remove previous install to prevent stale code/venv from persisting
+  if [[ -d "$REPO_DIR" ]]; then
+    log "Removing previous install..."
+    rm -rf "$REPO_DIR"
+  fi
+}
+
 main() {
   require_root
+  nuke_stale
   install_dependencies
   sync_repo
   setup_runtime
