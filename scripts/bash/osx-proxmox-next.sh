@@ -987,6 +987,15 @@ fi
 msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
 msg_ok "Virtual Machine ID is ${CL}${BL}$VMID${CL}."
 
+# ── Apple Services toggle ──
+if whiptail --backtitle "OSX Proxmox Next" --title "Apple Services" --yesno \
+  "Enable Apple Services (iMessage, FaceTime, iCloud)?\n\nThis generates a unique SMBIOS identity, static MAC, and patches OpenCore PlatformInfo.\n\nNOTE: Apple Services only work on macOS Sonoma 14 and earlier.\nSequoia 15+ requires signing in on Sonoma first, then upgrading." \
+  14 70 --defaultno 3>&1 1>&2 2>&3; then
+  APPLE_SERVICES="true"
+  msg_ok "Apple Services enabled"
+else
+  msg_ok "Apple Services disabled"
+fi
 
 # ── Download OpenCore ISO ──
 CACHE_DIR="/var/lib/vz/template/cache"

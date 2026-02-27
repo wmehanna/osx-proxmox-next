@@ -439,7 +439,7 @@ class NextApp(App):
             self._toggle_purge()
         if event.checkbox.id == "apple_services_cb":
             self.state.apple_services = event.checkbox.value
-            self._update_smbios_preview()
+            self._generate_smbios()
             self._toggle_apple_services_fields()
 
     def _toggle_apple_services_fields(self) -> None:
@@ -521,7 +521,7 @@ class NextApp(App):
 
     def _select_os(self, key: str) -> None:
         self.state.selected_os = key
-        self.state.smbios = generate_smbios(key)
+        self.state.smbios = generate_smbios(key, self.state.apple_services)
         # Update card styles
         for os_key in SUPPORTED_MACOS:
             card = self.query_one(f"#os_{os_key}")
